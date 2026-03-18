@@ -1,0 +1,11 @@
+fastapi==0.135.1
+uvicorn[standard]==0.42.0
+sqlmodel[postgresql]==0.0.37
+asyncpg==0.31.0
+alembic==1.18.4
+python-dotenv==1.2.2
+pydantic==2.12.5
+pydantic-settings==2.13.1
+psycopg2-binary==2.9.11
+python-multipart==0.0.22
+elasticsearch==8.12.0

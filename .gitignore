@@ -1,0 +1,75 @@
+# 🔥 Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 🔥 Virtual environments
+.env
+.venv
+venv/
+env/
+ENV/
+
+# 🔥 Environment variables (VERY IMPORTANT)
+.env.*
+!.env.example
+
+# 🔥 Logs
+*.log
+logs/
+
+# 🔥 Database files (if using SQLite locally)
+*.sqlite3
+*.db
+
+# 🔥 Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 🔥 Test / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# 🔥 IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 🔥 OS files
+.DS_Store
+Thumbs.db
+
+# 🔥 Jupyter (if used)
+.ipynb_checkpoints/
+
+# 🔥 FastAPI specific (optional)
+*.pid
+uvicorn.log
+
+# 🔥 Docker (optional)
+docker-compose.override.yml
+
+# 🔥 Node (if you have React frontend in same repo)
+node_modules/
+dist/
+build/
+
+# 🔥 Static / media (if generated)
+media/
+staticfiles/
+
+# 🔥 Secrets / keys
+*.pem
+*.key
+*.crt
+
+# 🔥 Temporary files
+*.tmp
+*.bak
