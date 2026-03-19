@@ -7,7 +7,7 @@ from app.settings import settings
 
 DEBUG = settings.debug
 
-engine = create_async_engine(settings.database_url, echo=DEBUG)
+engine = create_async_engine(settings.database_url, echo=False)
 
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

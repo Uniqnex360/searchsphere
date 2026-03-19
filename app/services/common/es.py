@@ -15,10 +15,7 @@ class ElasticsearchService:
         return self.es.update(index=self.index, id=doc_id, doc={"doc": data})
 
     def upsert(self, doc_id: str | int, data: dict):
-        """Update if exists, else create"""
-        return self.es.update(
-            index=self.index, id=doc_id, doc={"doc": data}, doc_as_upsert=True
-        )
+        return self.es.update(index=self.index, id=doc_id, doc=data, doc_as_upsert=True)
 
     def delete(self, doc_id: str | int):
         """Delete a document"""
@@ -31,3 +28,18 @@ class ElasticsearchService:
     def search(self, query: dict):
         """Search documents"""
         return self.es.search(index=self.index, body=query)
+
+
+class ElasticsearchIndexManager:
+    """this class is used for index level operations"""
+
+    def __init__(self, es: Elasticsearch):
+        self.es = es
+
+    def ensure_index(self, index: str, mapping: dict):
+        if not self.es.indices.exists(index=index):
+            self.es.indices.create(index=index, body=mapping)
+            print(f"Created index: {index}")
+        else:
+            self.es.indices.put_mapping(index=index, body=mapping["mappings"])
+            print(f"Updated mapping: {index}")

@@ -415,7 +415,7 @@ async def autocomplete_products(
                                         "doc.brand^8",
                                         "doc.category_name^5",
                                         "doc.vendor_name^4",
-                                        "doc.industry_name^3",
+                                        "doc.industry_name^3", #TODO: add all the fields
                                     ],
                                     "boost": 8,
                                 }
@@ -485,7 +485,7 @@ async def autocomplete_products(
                                         "doc.attributes.value",
                                         "doc.attributes.uom",
                                     ],
-                                    "boost": 1.5,
+                                    "boost": 1.5, #TODO: sort by alpha , price, and filter by brands
                                 }
                             },
                             # 🔥 7. Exact keyword (IDs)

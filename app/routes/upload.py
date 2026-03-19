@@ -1,5 +1,6 @@
 import pandas as pd
 from elasticsearch import Elasticsearch
+from qdrant_client import QdrantClient
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.future import select
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
@@ -20,6 +21,9 @@ from app.services import (
     ElasticsearchService,
     get_or_create,
     sync_with_product,
+    sync_with_vector_product,
+    sync_product_with_es_qdrant,
+    get_qdrant_client,
 )
 from app.es_client import get_es
 
@@ -51,11 +55,12 @@ async def upload_products_csv(
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
     es: Elasticsearch = Depends(get_es),
+    qdrant: QdrantClient = Depends(get_qdrant_client),
 ):
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files allowed")
 
-    es_service = ElasticsearchService(es, "products")
+    es_service = ElasticsearchService(es, "product_vector")
 
     df = pd.read_csv(
         file.file,
@@ -196,9 +201,9 @@ async def upload_products_csv(
                     "category",
                     "industry",
                     "features",
-                    # "images",
-                    # "videos",
-                    # "documents",
+                    "images",
+                    "videos",
+                    "documents",
                     "attributes",
                 ],
             )
@@ -258,7 +263,9 @@ async def upload_products_csv(
                 )
 
         # updates the data in elasticsearch
-        background_tasks.add_task(sync_with_product, es_service, product.id, product)
+        background_tasks.add_task(
+            sync_product_with_es_qdrant, es_service, product.id, product, qdrant
+        )
 
     await session.commit()
 

@@ -12,3 +12,5 @@ class MPTTBase(BaseModel):
     right: int = Field(index=True)
     level: int = Field(index=True)
     tree_id: int = Field(index=True)
+
+

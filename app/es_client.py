@@ -19,4 +19,4 @@ es = get_es_client()
 def get_es():
     """dependency to get es client"""
 
-    return get_es_client()
+    return es
