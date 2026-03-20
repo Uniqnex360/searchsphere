@@ -196,26 +196,58 @@ def vector_search(qdrant, query: str, limit: int = 20, filters: dict = None):
         return []  # ✅ skip vector search
 
     vector = get_embedding(query)
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    qdrant_filter = None
+    if filters:
+        must_conditions = []
+        if "brand" in filters and filters["brand"]:
+            must_conditions.append(
+                Filter(
+                    should=[
+                        FieldCondition(key="brand", match=MatchValue(value=b))
+                        for b in filters["brand"]
+                    ],
+                )
+            )
+        if "category" in filters and filters["category"]:
+            must_conditions.append(
+                Filter(
+                    should=[
+                        FieldCondition(key="category", match=MatchValue(value=c))
+                        for c in filters["category"]
+                    ],
+                )
+            )
+
+        if must_conditions:
+            qdrant_filter = Filter(must=must_conditions)
 
     response = qdrant.query_points(
         collection_name=QDrantCollection.PRODUCT.value,
         query=vector,
-        limit=limit,
+        query_filter=qdrant_filter,
+        limit=20,
         with_payload=True,
     )
     return response.points
 
 
+from typing import List, Dict, Any, Optional
+from elasticsearch import Elasticsearch
+
+
+# -----------------------------
+# MERGE FUNCTION
+# -----------------------------
 def merge_results(keyword_results, vector_results, debug: bool = False):
     """
     Hybrid merge with debug logs to understand:
     - ES vs Vector contributions
     - Score composition
     """
-
     ES_WEIGHT = 0.7
     VECTOR_WEIGHT = 0.3
-
     results = {}
 
     # -----------------------------
@@ -234,8 +266,7 @@ def merge_results(keyword_results, vector_results, debug: bool = False):
 
     for r in keyword_results:
         pid = r["_id"]
-        es_score = r["_score"]
-
+        es_score = r.get("_score") or 0
         if debug:
             print(
                 f"[ES] ID={pid} | ES Score={es_score:.4f} | Weighted={es_score * ES_WEIGHT:.4f}"
@@ -245,6 +276,7 @@ def merge_results(keyword_results, vector_results, debug: bool = False):
             "data": r["_source"],
             "score": es_score * ES_WEIGHT,
             "score_breakdown": {"es": es_score, "vector": 0},
+            "es_order": r.get("_es_order", 0),  # preserve ES order
         }
 
     # -----------------------------
@@ -268,6 +300,7 @@ def merge_results(keyword_results, vector_results, debug: bool = False):
                 "data": r.payload,
                 "score": vector_score * VECTOR_WEIGHT,
                 "score_breakdown": {"es": 0, "vector": vector_score},
+                "es_order": float("inf"),  # comes after ES results
             }
         else:
             # Exists in both ES + Vector
@@ -291,14 +324,13 @@ def merge_results(keyword_results, vector_results, debug: bool = False):
                 f"Vector={item['score_breakdown']['vector']:.4f} | "
                 f"Final Score={item['score']:.4f}"
             )
-
         print("========== MERGE DEBUG END ==========\n")
 
     return results
 
 
 # -----------------------------
-# 6. FINAL HYBRID SEARCH API
+# FINAL HYBRID SEARCH API
 # -----------------------------
 async def autocomplete_with_es_qdrant(
     es: Elasticsearch,
@@ -306,7 +338,8 @@ async def autocomplete_with_es_qdrant(
     query: str,
     size: int = 50,
     filters: Optional[Dict[str, Any]] = None,
-    sort_by: str = "relevance",  # "relevance" | "product_name"
+    sort_by: str = "relevance",  # "relevance" | "product_name" | "base_price"
+    sort_order: str = "desc",  # "desc" | "asc"
     index: str = "product_vector",
 ) -> List[Dict[str, Any]]:
 
@@ -317,18 +350,47 @@ async def autocomplete_with_es_qdrant(
     filter_clauses = apply_filters(filters)
 
     # -----------------------------
-    # ELASTIC QUERY (optimized)
+    # Elasticsearch Sort Handling
+    # -----------------------------
+    es_sort = []
+    # Determine a very large number that won't appear in real data
+    VERY_HIGH = 1e10
+    VERY_LOW = -1e10
+    if sort_by == "product_name":
+        es_sort.append(
+            {
+                "product_name.keyword": {
+                    "order": sort_order,
+                    "missing": "_last",  # nulls go last
+                }
+            }
+        )
+    elif sort_by == "base_price":
+        missing_value = VERY_HIGH if sort_order == "asc" else VERY_LOW
+        es_sort.append({"base_price": {"order": sort_order, "missing": missing_value}})
+    else:
+        es_sort.append({"_score": {"order": sort_order}})
+
+    # -----------------------------
+    # ELASTIC QUERY
     # -----------------------------
     body = {
         "size": size,
-        "_source": ["product_name", "brand", "category_name", "taxonomy", "images.url"],
+        "_source": [
+            "product_name",
+            "brand",
+            "category_name",
+            "taxonomy",
+            "base_price",
+            "images.url",
+        ],
         "query": {
             "bool": {
                 "must": [base_query],
                 "filter": filter_clauses,
-                # "minimum_should_match": 1,
             }
         },
+        "sort": es_sort,
     }
 
     es_response = es.search(index=index, body=body)
@@ -338,40 +400,66 @@ async def autocomplete_with_es_qdrant(
     # VECTOR SEARCH
     # -----------------------------
     vector_results = vector_search(qdrant, query, limit=size, filters=filters)
-
     # -----------------------------
     # MERGE RESULTS
     # -----------------------------
     merged = merge_results(keyword_hits, vector_results)
 
+    # -----------------------------
+    # PREPARE FINAL RESULTS
+    # -----------------------------
     results = []
     for pid, item in merged.items():
         source = item["data"]
-
         results.append(
             {
                 "id": pid,
                 "score": item["score"],
-                # BASIC INFO
                 "name": source.get("product_name"),
                 "brand": source.get("brand"),
                 "category": source.get("category_name") or source.get("category"),
-                # MEDIA
+                "base_price": source.get("base_price"),
                 "images": [
                     i.get("url")
                     for i in (source.get("images") or [])
                     if isinstance(i, dict)
                 ],
+                "es_order": item.get("es_order", float("inf")),
             }
         )
 
     # -----------------------------
-    # SORTING ENGINE
+    # SORT FINAL RESULTS (null-safe, tie-breaker with ES order)
     # -----------------------------
-    if sort_by == "product_name":
-        results.sort(key=lambda x: (x.get("product_name") or "").lower())
+    reverse = sort_order == "desc"
 
+    def null_safe_key(val, reverse=False):
+        # None always sorts last
+        if val is None:
+            return float("inf") if not reverse else float("-inf")
+        return val
+
+    if sort_by == "product_name":
+        results.sort(
+            key=lambda x: (
+                null_safe_key((x.get("name") or "").lower(), reverse),
+                x["es_order"],
+            ),
+            reverse=reverse,
+        )
+    elif sort_by == "base_price":
+        results.sort(
+            key=lambda x: (null_safe_key(x.get("base_price"), reverse), x["es_order"]),
+            reverse=reverse,
+        )
     else:
-        results.sort(key=lambda x: x["score"], reverse=True)
+        results.sort(
+            key=lambda x: (null_safe_key(x.get("score"), reverse), x["es_order"]),
+            reverse=reverse,
+        )
+
+    # Remove ES order from final output
+    for r in results:
+        r.pop("es_order", None)
 
     return results

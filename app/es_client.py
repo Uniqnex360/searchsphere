@@ -5,7 +5,7 @@ from app.settings import settings
 def get_es_client():
     es = Elasticsearch(
         settings.elastic_search_url,
-        request_timeout=10,
+        api_key=settings.elastic_search_api_key,
         max_retries=3,
         retry_on_timeout=True,
         headers={"accept": "application/vnd.elasticsearch+json;compatible-with=8"},
