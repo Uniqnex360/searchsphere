@@ -53,7 +53,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://35.175.188.201.nip.io",
+        "https://searchsphere-fe-olxj.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
