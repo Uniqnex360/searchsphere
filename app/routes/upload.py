@@ -83,6 +83,7 @@ async def upload_products_csv(
 
         mpn = row.get("mpn")
         product_name = row.get("product_name")
+        print("", _, product_name)
         stmt = select(Product).where(
             Product.mpn == mpn, Product.product_name == product_name
         )
