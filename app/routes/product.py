@@ -97,7 +97,7 @@ async def get_product_filter_meta(db: AsyncSession = Depends(get_session)):
     return {"brands": brands, "categories": categories, "price_ranges": price_ranges}
 
 
-@router.get("/product/detail/{id}")
+@router.get("/product/detail/{id}/")
 async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
     result = await db.execute(
         select(Product)
