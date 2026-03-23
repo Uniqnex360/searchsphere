@@ -1,8 +1,10 @@
+import time
 import pandas as pd
 from elasticsearch import Elasticsearch
 from qdrant_client import QdrantClient
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy import text, tuple_
 from sqlalchemy.future import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 
 from app.database import get_session
@@ -57,11 +59,14 @@ async def upload_products_csv(
     es: Elasticsearch = Depends(get_es),
     qdrant: QdrantClient = Depends(get_qdrant_client),
 ):
+    start_total = time.perf_counter()
+
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files allowed")
 
     es_service = ElasticsearchService(es, "product_vector")
 
+    # ---- CSV READ ----
     df = pd.read_csv(
         file.file,
         sep=",",
@@ -70,204 +75,191 @@ async def upload_products_csv(
         dtype=str,
         skipinitialspace=True,
     )
-
-    # Convert ALL NaN → None
     df = df.where(pd.notna(df), None)
 
     inserted, updated = 0, 0
     category_service = CategoryService(Category)
 
-    for _, row in df.iterrows():
+    # ---- PREPARE PRODUCT MAP ----
+    keys = set((row.mpn, row.product_name) for row in df.itertuples(index=False))
+    stmt = select(Product).where(tuple_(Product.mpn, Product.product_name).in_(keys))
+    result = await session.execute(stmt)
+    existing_products = result.scalars().all()
+    product_map = {(p.mpn, p.product_name): p for p in existing_products}
 
-        row = {k: clean(v) for k, v in row.items()}
+    # ---- CACHES ----
+    industry_cache = {}
+    category_cache = {}
 
-        mpn = row.get("mpn")
-        product_name = row.get("product_name")
-        print("", _, product_name)
-        stmt = select(Product).where(
-            Product.mpn == mpn, Product.product_name == product_name
-        )
+    # Collect IDs for deleting old relations
+    products_to_delete_relations = []
 
-        result = await session.execute(stmt)
-        existing_product = result.scalar_one_or_none()
+    # ---- PROCESS EACH ROW ----
+    products_for_bg_task = []
+    for row in df.itertuples(index=False):
+        row_dict = {k: clean(getattr(row, k)) for k in row._fields}
 
+        mpn = row_dict.get("mpn")
+        product_name = row_dict.get("product_name")
+        existing_product = product_map.get((mpn, product_name))
+        print("processing product", product_name)
         if existing_product:
             product = existing_product
             updated += 1
+            products_to_delete_relations.append(product.id)
         else:
             product = Product(mpn=mpn, product_name=product_name)
             inserted += 1
-
-        # ---- Update product fields ----
-
-        product.sku = row.get("sku")
-        product.brand = row.get("brand")
-        product.gtin = row.get("gtin")
-        product.ean = row.get("ean")
-        product.upc = row.get("upc")
-        product.taxonomy = row.get("taxonomy")
-        product.country_of_origin = row.get("country_of_origin")
-        product.warranty = row.get("warranty")
-
-        product.weight = to_float(row.get("weight"))
-        product.weight_unit = row.get("weight_unit")
-
-        product.length = to_float(row.get("length"))
-        product.width = to_float(row.get("width"))
-        product.height = to_float(row.get("height"))
-
-        product.dimension_unit = row.get("dimension_unit")
-        product.currency = row.get("currency")
-
-        product.base_price = to_float(row.get("base_price"))
-        product.sale_price = to_float(row.get("sale_price"))
-        product.selling_price = to_float(row.get("selling_price"))
-        product.special_price = to_float(row.get("special_price"))
-
-        product.stock_qty = to_int(row.get("stock_qty"))
-        product.stock_status = row.get("stock_status")
-
-        product.vendor_name = row.get("vendor_name")
-        product.vendor_sku = row.get("vendor_sku")
-
-        product.short_description = row.get("short_description")
-        product.long_description = row.get("long_description")
-
-        product.meta_title = row.get("meta_title")
-        product.meta_description = row.get("meta_description")
-        product.search_keywords = row.get("search_keywords")
-
-        product.certification = row.get("certification")
-        product.safety_standard = row.get("safety_standard")
-        product.hazardous_material = row.get("hazardous_material")
-        product.prop65_warning = row.get("prop65_warning")
-
-        # ---- Industry ----
-
-        industry_obj, _ = await get_or_create(
-            db=session,
-            model=Industry,
-            industry_name=row.get("industry_name"),
-        )
-
-        product.industry_id = industry_obj.id
-
-        # ---- Category ----
-
-        category_obj = await category_service.create_from_path(
-            session,
-            industry_name=industry_obj.industry_name,
-            path=row.get("taxonomy"),
-        )
-
-        product.category_id = category_obj.id
-
-        if not existing_product:
             session.add(product)
 
+        # ---- UPDATE FIELDS ----
+        for field in [
+            "sku",
+            "brand",
+            "gtin",
+            "ean",
+            "upc",
+            "taxonomy",
+            "country_of_origin",
+            "warranty",
+            "weight_unit",
+            "dimension_unit",
+            "currency",
+            "stock_status",
+            "vendor_name",
+            "vendor_sku",
+            "short_description",
+            "long_description",
+            "meta_title",
+            "meta_description",
+            "search_keywords",
+            "certification",
+            "safety_standard",
+            "hazardous_material",
+            "prop65_warning",
+        ]:
+            setattr(product, field, row_dict.get(field))
+
+        # Numeric fields
+        product.weight = to_float(row_dict.get("weight"))
+        product.length = to_float(row_dict.get("length"))
+        product.width = to_float(row_dict.get("width"))
+        product.height = to_float(row_dict.get("height"))
+        product.base_price = to_float(row_dict.get("base_price"))
+        product.sale_price = to_float(row_dict.get("sale_price"))
+        product.selling_price = to_float(row_dict.get("selling_price"))
+        product.special_price = to_float(row_dict.get("special_price"))
+        product.stock_qty = to_int(row_dict.get("stock_qty"))
+
+        # ---- INDUSTRY ----
+        industry_name = row_dict.get("industry_name")
+        if industry_name in industry_cache:
+            industry_obj = industry_cache[industry_name]
         else:
-            # delete previous related rows
-            await session.exec(
-                ProductImage.__table__.delete().where(
-                    ProductImage.product_id == product.id
-                )
+            industry_obj, _ = await get_or_create(
+                db=session, model=Industry, industry_name=industry_name
             )
-            await session.exec(
-                ProductVideo.__table__.delete().where(
-                    ProductVideo.product_id == product.id
-                )
+            industry_cache[industry_name] = industry_obj
+        product.industry_id = industry_obj.id
+
+        # ---- CATEGORY ----
+        taxonomy = row_dict.get("taxonomy")
+        category_key = (industry_obj.industry_name, taxonomy)
+        if category_key in category_cache:
+            category_obj = category_cache[category_key]
+        else:
+            category_obj = await category_service.create_from_path(
+                session, industry_name=industry_obj.industry_name, path=taxonomy
             )
-            await session.exec(
-                ProductDocument.__table__.delete().where(
-                    ProductDocument.product_id == product.id
-                )
-            )
-            await session.exec(
-                ProductFeature.__table__.delete().where(
-                    ProductFeature.product_id == product.id
-                )
-            )
-            await session.exec(
-                ProductAttribute.__table__.delete().where(
-                    ProductAttribute.product_id == product.id
-                )
+            category_cache[category_key] = category_obj
+        product.category_id = category_obj.id
+
+        products_for_bg_task.append((product, row_dict))
+
+    # ---- DELETE OLD RELATIONS BEFORE COMMIT ----
+    if products_to_delete_relations:
+        tables = [
+            "productimage",
+            "productvideo",
+            "productdocument",
+            "productfeature",
+            "productattribute",
+        ]
+        for tbl in tables:
+            await session.execute(
+                text(f"DELETE FROM {tbl} WHERE product_id = ANY(:pids)"),
+                {"pids": products_to_delete_relations},
             )
 
-            await session.flush()
+    # ---- FLUSH TO GET PRODUCT IDs ----
+    await session.flush()
 
-            await session.refresh(
-                product,
-                attribute_names=[
-                    "category",
-                    "industry",
-                    "features",
-                    "images",
-                    "videos",
-                    "documents",
-                    "attributes",
-                ],
-            )
-
-        # ---- Images ----
-
+    # ---- ADD RELATIONS ----
+    relation_objects = []
+    for product, row_dict in products_for_bg_task:
+        # IMAGES
         for i in range(1, 9):
-            name = row.get(f"image_name_{i}")
-            url = row.get(f"image_url_{i}")
-
+            name, url = row_dict.get(f"image_name_{i}"), row_dict.get(f"image_url_{i}")
             if name and url:
-                session.add(ProductImage(product=product, name=name, url=url))
-
-        # ---- Videos ----
-
-        for i in range(1, 4):
-            name = row.get(f"video_name_{i}")
-            url = row.get(f"video_url_{i}")
-
-            if name and url:
-                session.add(ProductVideo(product=product, name=name, url=url))
-
-        # ---- Documents ----
-
-        for i in range(1, 6):
-            name = row.get(f"document_name_{i}")
-            url = row.get(f"document_url_{i}")
-
-            if name and url:
-                session.add(ProductDocument(product=product, name=name, url=url))
-
-        # ---- Features ----
-
-        for i in range(1, 11):
-            value = row.get(f"features_{i}")
-
-            if value:
-                session.add(
-                    ProductFeature(product=product, name=f"features_{i}", value=value)
+                relation_objects.append(
+                    ProductImage(product_id=product.id, name=name, url=url)
                 )
-
-        # ---- Attributes ----
-
+        # VIDEOS
+        for i in range(1, 4):
+            name, url = row_dict.get(f"video_name_{i}"), row_dict.get(f"video_url_{i}")
+            if name and url:
+                relation_objects.append(
+                    ProductVideo(product_id=product.id, name=name, url=url)
+                )
+        # DOCUMENTS
+        for i in range(1, 6):
+            name, url = row_dict.get(f"document_name_{i}"), row_dict.get(
+                f"document_url_{i}"
+            )
+            if name and url:
+                relation_objects.append(
+                    ProductDocument(product_id=product.id, name=name, url=url)
+                )
+        # FEATURES
+        for i in range(1, 11):
+            value = row_dict.get(f"features_{i}")
+            if value:
+                relation_objects.append(
+                    ProductFeature(
+                        product_id=product.id, name=f"features_{i}", value=value
+                    )
+                )
+        # ATTRIBUTES
         for i in range(1, 41):
-            name = row.get(f"attribute_name{i}")
-
+            name = row_dict.get(f"attribute_name{i}")
             if name and name.strip():
-                session.add(
+                relation_objects.append(
                     ProductAttribute(
-                        product=product,
+                        product_id=product.id,
                         attribute_name=name,
-                        attribute_value=row.get(f"attribute_value{i}"),
-                        attribute_uom=row.get(f"attribute_uom{i}"),
-                        validation_value=row.get(f"validation_value{i}"),
-                        validation_uom=row.get(f"validation_uom{i}"),
+                        attribute_value=row_dict.get(f"attribute_value{i}"),
+                        attribute_uom=row_dict.get(f"attribute_uom{i}"),
+                        validation_value=row_dict.get(f"validation_value{i}"),
+                        validation_uom=row_dict.get(f"validation_uom{i}"),
                     )
                 )
 
-        # updates the data in elasticsearch
-        background_tasks.add_task(
-            sync_product_with_es_qdrant, es_service, product.id, product, qdrant
-        )
+    # ---- BULK ADD RELATIONS ----
+    session.add_all(relation_objects)
 
+    # ---- COMMIT ALL ----
     await session.commit()
+
+    # ---- SCHEDULE BACKGROUND TASKS AFTER COMMIT ----
+    for product, _ in products_for_bg_task:
+        background_tasks.add_task(
+            sync_product_with_es_qdrant,
+            es_service,
+            product.id,
+            product,
+            qdrant,
+            session,
+        )
 
     return {
         "status": "success",

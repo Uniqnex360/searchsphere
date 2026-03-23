@@ -1,5 +1,7 @@
-import re
 from typing import Dict, Any, List, Optional
+from sqlmodel import select
+from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 from elasticsearch import Elasticsearch
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
@@ -14,8 +16,26 @@ async def sync_product_with_es_qdrant(
     product_id: str | int,
     product: Product,
     qdrant_client: QdrantClient,
+    session: AsyncSession
 ):
     """syncs product data with elastic search and qdrand concurrently"""
+
+    product = await session.execute(
+        select(Product)
+        .options(
+            selectinload(Product.images),
+            selectinload(Product.features),
+            selectinload(Product.attributes),
+            selectinload(Product.videos),
+            selectinload(Product.documents),
+            selectinload(Product.category),
+            selectinload(Product.industry),
+        )
+        .where(Product.id == product_id)
+    )
+    product = product.scalars().one()
+
+    print(product_id)
 
     data = {
         # search
@@ -240,7 +260,7 @@ from elasticsearch import Elasticsearch
 # -----------------------------
 # MERGE FUNCTION
 # -----------------------------
-def merge_results(keyword_results, vector_results, debug: bool = False):
+def merge_results(keyword_results, vector_results, debug: bool = True):
     """
     Hybrid merge with debug logs to understand:
     - ES vs Vector contributions

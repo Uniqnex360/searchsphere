@@ -2,7 +2,10 @@ from typing import Optional, List
 from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func
+from sqlalchemy.orm import selectinload
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from app.models import Product, Category
 from app.services import (
     autocomplete_products,
@@ -92,3 +95,42 @@ async def get_product_filter_meta(db: AsyncSession = Depends(get_session)):
             current += step_size
 
     return {"brands": brands, "categories": categories, "price_ranges": price_ranges}
+
+
+@router.get("/product/detail/{id}")
+async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
+    result = await db.execute(
+        select(Product)
+        .where(Product.id == id)
+        .options(
+            selectinload(Product.images),
+            selectinload(Product.features),
+            selectinload(Product.attributes),
+            selectinload(Product.videos),
+            selectinload(Product.documents),
+            selectinload(Product.category),
+            selectinload(Product.industry),
+        )
+    )
+    product = result.scalar_one_or_none()
+
+    if not product:
+        return JSONResponse(
+            status_code=404, content={"success": False, "error": "Product not found"}
+        )
+
+    # Convert SQLAlchemy object to JSON-serializable dict
+    product_data = jsonable_encoder(product)
+
+    # Convert related objects
+    product_data["images"] = [jsonable_encoder(img) for img in product.images]
+    product_data["features"] = [jsonable_encoder(f) for f in product.features]
+    product_data["attributes"] = [jsonable_encoder(a) for a in product.attributes]
+    product_data["videos"] = [jsonable_encoder(v) for v in product.videos]
+    product_data["documents"] = [jsonable_encoder(d) for d in product.documents]
+    product_data["category"] = jsonable_encoder(product.category) if product.category else None
+    product_data["industry"] = jsonable_encoder(product.industry) if product.industry else None
+
+    return {"success": True, "data": product_data}
+
+

@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import get_session
 from app.routes import routers
-from app.settings import settings
 from app.services import get_qdrant_client, QDrantCollection
 
 
