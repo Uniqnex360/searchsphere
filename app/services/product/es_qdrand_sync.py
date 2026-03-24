@@ -16,7 +16,7 @@ async def sync_product_with_es_qdrant(
     product_id: str | int,
     product: Product,
     qdrant_client: QdrantClient,
-    session: AsyncSession
+    session: AsyncSession,
 ):
     """syncs product data with elastic search and qdrand concurrently"""
 
@@ -143,17 +143,18 @@ def build_search_query(query: str) -> Dict[str, Any]:
                     "multi_match": {
                         "query": query,
                         "fields": [
-                            "product_name^5",
+                            "product_name^10",
                             "brand^3",
                             "search_text^4",
                             "short_description^2",
                             "long_description^2",
                             "features",
                         ],
+                        "type": "bool_prefix",
                         "fuzziness": "AUTO",
                         "prefix_length": 1,
                         "max_expansions": 50,
-                        "operator": "and",
+                        "operator": "or",
                     }
                 },
                 {"term": {"sku.keyword": {"value": query, "boost": 20}}},
@@ -162,7 +163,7 @@ def build_search_query(query: str) -> Dict[str, Any]:
                 {"term": {"upc.keyword": {"value": query, "boost": 20}}},
                 {"term": {"ean.keyword": {"value": query, "boost": 20}}},
             ],
-            # "minimum_should_match": 1,
+            "minimum_should_match": 1,
         }
     }
 
@@ -370,6 +371,16 @@ async def autocomplete_with_es_qdrant(
     filter_clauses = apply_filters(filters)
 
     # -----------------------------
+    # GET COUNTS
+    # -----------------------------
+    # Total documents in the index
+    total_docs = es.count(index=index)["count"]
+
+    # Total documents matching query + filters
+    count_body = {"query": {"bool": {"must": [base_query], "filter": filter_clauses}}}
+    total_docs_after_filter = es.count(index=index, body=count_body)["count"]
+
+    # -----------------------------
     # Elasticsearch Sort Handling
     # -----------------------------
     es_sort = []
@@ -415,15 +426,21 @@ async def autocomplete_with_es_qdrant(
 
     es_response = es.search(index=index, body=body)
     keyword_hits = es_response.get("hits", {}).get("hits", [])
-
-    # -----------------------------
-    # VECTOR SEARCH
-    # -----------------------------
-    vector_results = vector_search(qdrant, query, limit=size, filters=filters)
-    # -----------------------------
-    # MERGE RESULTS
-    # -----------------------------
-    merged = merge_results(keyword_hits, vector_results)
+    if keyword_hits:
+        # ES has results → skip vector search, just map ES hits into merged dict
+        merged = {
+            r["_id"]: {
+                "data": r["_source"],
+                "score": r.get("_score", 0),
+                "score_breakdown": {"es": r.get("_score", 0), "vector": 0},
+                "es_order": r.get("_es_order", 0),
+            }
+            for r in keyword_hits
+        }
+    else:
+        # ES returned nothing → fallback to vector search
+        vector_results = vector_search(qdrant, query, limit=size, filters=filters)
+        merged = merge_results(keyword_hits, vector_results)
 
     # -----------------------------
     # PREPARE FINAL RESULTS
@@ -482,4 +499,8 @@ async def autocomplete_with_es_qdrant(
     for r in results:
         r.pop("es_order", None)
 
-    return results
+    return {
+        "total_docs": total_docs,
+        "total_docs_after_filter": total_docs_after_filter,
+        "results": results,
+    }

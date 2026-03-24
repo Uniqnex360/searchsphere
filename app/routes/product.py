@@ -11,6 +11,7 @@ from app.services import (
     autocomplete_products,
     autocomplete_product_vector,
     autocomplete_with_es_qdrant,
+    get_product_auto_complete_v3,
 )
 from app.es_client import get_es
 from app.database import get_session
@@ -128,9 +129,37 @@ async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
     product_data["attributes"] = [jsonable_encoder(a) for a in product.attributes]
     product_data["videos"] = [jsonable_encoder(v) for v in product.videos]
     product_data["documents"] = [jsonable_encoder(d) for d in product.documents]
-    product_data["category"] = jsonable_encoder(product.category) if product.category else None
-    product_data["industry"] = jsonable_encoder(product.industry) if product.industry else None
+    product_data["category"] = (
+        jsonable_encoder(product.category) if product.category else None
+    )
+    product_data["industry"] = (
+        jsonable_encoder(product.industry) if product.industry else None
+    )
 
     return {"success": True, "data": product_data}
 
 
+@router.get("/product/v3/auto-complete/")
+async def autocomplate_product_vector(
+    q: str = "",
+    brand_: Optional[List[str]] = Query(None, alias="brand[]"),
+    category_: Optional[List[str]] = Query(None, alias="category[]"),
+    price_min: Optional[float] = Query(None),
+    price_max: Optional[float] = Query(None),
+    es: Elasticsearch = Depends(get_es),
+    qdrant: Elasticsearch = Depends(get_qdrant_client),
+    sort_by: str | None = None,
+    sort_order: str = "desc",
+):
+
+    filters = {
+        "brand": brand_,
+        "category": category_,
+        "price_min": price_min,
+        "price_max": price_max,
+    }
+    data = await get_product_auto_complete_v3(
+        es, qdrant, q, filters=filters, sort_by=sort_by, sort_order=sort_order
+    )
+
+    return {"total": len(data), "data": data}
