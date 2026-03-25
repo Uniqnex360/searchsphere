@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 from elasticsearch import Elasticsearch
 
 from app.helpers import get_embedding
@@ -99,26 +99,41 @@ SYNONYMS = {
 }
 
 
-# -----------------------------
-# QUERY PROCESSOR
-# -----------------------------
-async def query_processor(query: str) -> dict:
+async def query_processor(query: str) -> Dict[str, Any]:
+    # 1. normalize base query
     query_lower = query.lower().strip()
 
-    # Extract numbers with units
-    numbers = re.findall(r"(\d+\.?\d*)\s?(mm|cm|inch|in|kg|g)", query_lower)
+    # 2. normalize stuck units: 3.2mm → 3.2 mm
+    query_lower = re.sub(
+        r"(\d+(\.\d+)?)(mm|cm|inch|in|kg|g)\b",
+        r"\1 \3",
+        query_lower,
+    )
 
-    # Extract materials and categories
+    # 3. extract number + unit pairs
+    numbers: List[Tuple[str, str]] = re.findall(
+        r"(\d+\.?\d*)\s?(mm|cm|inch|in|kg|g)",
+        query_lower,
+    )
+
+    # 4. build safe tokens (DO NOT use for ranking alone)
+    tokens = re.findall(r"\d+\.?\d+|[a-zA-Z]+", query_lower)
+
+    # 5. build normalized number-unit phrases (IMPORTANT FIX)
+    number_unit_phrases: List[str] = []
+    for num, unit in numbers:
+        number_unit_phrases.append(f"{num}{unit}")  # 3.2mm
+        number_unit_phrases.append(f"{num} {unit}")  # 3.2 mm
+
+    # 6. extract metadata
     brands = [b for b in BRANDS if b in query_lower]
     materials = [m for m in MATERIALS if m in query_lower]
     categories = [c for c in CATEGORIES if c in query_lower]
 
-    # Split tokens
-    tokens = query_lower.split()
-
     return {
         "raw": query_lower,
         "numbers": numbers,
+        "number_unit_phrases": number_unit_phrases,
         "brand": brands,
         "materials": materials,
         "categories": categories,
@@ -144,6 +159,9 @@ async def expand_query(parsed: dict) -> list:
     # Add categories
     for cat in parsed.get("categories", []):
         expanded_terms.add(cat)
+
+    for phrase in parsed.get("number_unit_phrases", []):
+        expanded_terms.add(phrase)
 
     return list(expanded_terms)
 
@@ -187,12 +205,50 @@ def build_es_query_body(
             filter_clauses.append({"range": {"base_price": price_range}})
 
     must_clause = []
+
     if user_query.strip():
         must_clause.append(
             {
-                "multi_match": {
-                    "query": user_query,
-                    "fields": ["product_name^3", "long_description"],
+                "bool": {
+                    "should": [
+                        # 1. STRONG BRAND PREFIX MATCH (MOST IMPORTANT)
+                        {
+                            "prefix": {
+                                "brand.keyword": {
+                                    "value": user_query.lower(),
+                                    "boost": 50,
+                                }
+                            }
+                        },
+                        # 2. EXACT BRAND MATCH (VERY STRONG)
+                        {
+                            "term": {
+                                "brand.keyword": {
+                                    "value": user_query.lower(),
+                                    "boost": 100,
+                                }
+                            }
+                        },
+                        # 3. PRODUCT NAME MATCH (NORMAL)
+                        {
+                            "match_phrase_prefix": {
+                                "product_name": {"query": user_query, "boost": 20}
+                            }
+                        },
+                        # 4. GENERAL FALLBACK SEARCH
+                        {
+                            "multi_match": {
+                                "query": user_query,
+                                "fields": [
+                                    "product_name^5",
+                                    "long_description",
+                                    "category_name^2",
+                                    "vendor_name^3",
+                                ],
+                            }
+                        },
+                    ],
+                    "minimum_should_match": 1,
                 }
             }
         )
@@ -280,7 +336,7 @@ def vector_search(qdrant, query: str, limit: int = 20, filters: dict = None):
 # -----------------------------
 # MERGE RESULTS
 # -----------------------------
-def merge_results(keyword_results, vector_results, debug: bool = True):
+def merge_results(keyword_results, vector_results):
     ES_WEIGHT = 0.7
     VECTOR_WEIGHT = 0.3
     results = {}
@@ -320,18 +376,20 @@ async def get_product_auto_complete_v3(
     qdrant,
     query: str,
     size: int = 50,
+    page: int = 1,
     filters: Optional[Dict[str, Any]] = None,
     sort_by: str = "relevance",  # relevance | product_name | base_price
     sort_order: str = "desc",
     index: str = "product_vector",
 ):
     query_dict = await query_processor(query)
+    print("query dict", query_dict)
     expanded_query = await expand_query(query_dict)
+    print("expended query", expanded_query)
 
     es_query_body = build_es_query_body(
         query, filters=filters, expanded_terms=expanded_query
     )
-    filter_clauses = apply_filters(filters)
 
     # -----------------------------
     # Elasticsearch sort (null-safe at ES level)
@@ -362,6 +420,7 @@ async def get_product_auto_complete_v3(
     # Execute ES query
     # -----------------------------
     body = {
+        "from": (page - 1) * size,
         "size": size,
         "_source": [
             "product_name",
@@ -408,6 +467,9 @@ async def get_product_auto_complete_v3(
 
     return {
         "total_docs": total_docs,
-        "total_docs_after_filter": total_docs_after_filter,
+        "total_docs_after_filter": total_docs_after_filter or len(results),
+        "page": page,
+        "size": size,
+        "total_pages": (total_docs_after_filter + size - 1) // size,
         "results": results,
     }

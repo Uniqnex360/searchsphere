@@ -150,6 +150,7 @@ async def autocomplate_product_vector(
     qdrant: Elasticsearch = Depends(get_qdrant_client),
     sort_by: str | None = None,
     sort_order: str = "desc",
+    page: int = 1,
 ):
 
     filters = {
@@ -159,7 +160,7 @@ async def autocomplate_product_vector(
         "price_max": price_max,
     }
     data = await get_product_auto_complete_v3(
-        es, qdrant, q, filters=filters, sort_by=sort_by, sort_order=sort_order
+        es, qdrant, q, filters=filters, sort_by=sort_by, sort_order=sort_order, page=page
     )
 
     return {"total": len(data), "data": data}
