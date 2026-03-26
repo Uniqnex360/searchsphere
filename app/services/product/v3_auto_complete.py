@@ -261,7 +261,7 @@ def build_es_query_body(
                 "must": must_clause,
                 "should": should_clauses,
                 "minimum_should_match": 1 if should_clauses else 0,
-                "filter": filter_clauses,
+                # "filter": filter_clauses,
             }
         }
     }
@@ -315,7 +315,7 @@ def vector_search(qdrant, query: str, limit: int = 20, filters: dict = None):
             must_conditions.append(
                 Filter(
                     should=[
-                        FieldCondition(key="category", match=MatchValue(value=c))
+                        FieldCondition(key="category_name", match=MatchValue(value=c))
                         for c in filters["category"]
                     ],
                 )
@@ -383,9 +383,7 @@ async def get_product_auto_complete_v3(
     index: str = "product_vector",
 ):
     query_dict = await query_processor(query)
-    print("query dict", query_dict)
     expanded_query = await expand_query(query_dict)
-    print("expended query", expanded_query)
 
     es_query_body = build_es_query_body(
         query, filters=filters, expanded_terms=expanded_query
@@ -431,7 +429,62 @@ async def get_product_auto_complete_v3(
             "images.url",
         ],
         "query": es_query_body["query"],
+        "post_filter": {"bool": {"must": apply_filters(filters)}},
         "sort": es_sort,
+        # "aggs": {
+        #     "brands": {
+        #         "terms": {
+        #             "field": "brand.keyword",
+        #             "size": 1000,
+        #             "order": {"_key": "asc"},
+        #         }
+        #     },
+        #     "categories": {
+        #         "terms": {
+        #             "field": "category_name.keyword",
+        #             "size": 1000,
+        #             "order": {"_key": "asc"},
+        #         }
+        #     },
+        # },
+        "aggs": {
+            "brands": {
+                "filter": {
+                    "bool": {
+                        "must": apply_filters(
+                            {**filters, "brand": None}  # remove brand filter
+                        )
+                    }
+                },
+                "aggs": {
+                    "values": {
+                        "terms": {
+                            "field": "brand.keyword",
+                            "size": 1000,
+                            "order": {"_key": "asc"},
+                        }
+                    }
+                },
+            },
+            "categories": {
+                "filter": {
+                    "bool": {
+                        "must": apply_filters(
+                            {**filters, "category": None}  # remove category filter
+                        )
+                    }
+                },
+                "aggs": {
+                    "values": {
+                        "terms": {
+                            "field": "category_name.keyword",
+                            "size": 1000,
+                            "order": {"_key": "asc"},
+                        }
+                    }
+                },
+            },
+        },
     }
 
     es_resp = es.search(index=index, body=body)
@@ -439,8 +492,34 @@ async def get_product_auto_complete_v3(
     total_docs_after_filter = es_resp["hits"]["total"]["value"]
     keyword_hits = es_resp.get("hits", {}).get("hits", [])
 
+    aggs = es_resp.get("aggregations", {})
+    
+
+    # es_brands = [b["key"] for b in aggs.get("brands", {}).get("buckets", [])]
+    es_brands = [b["key"] for b in aggs.get("brands", {}).get("values", {}).get("buckets", [])]
+
+    # es_categories = [c["key"] for c in aggs.get("categories", {}).get("buckets", [])]
+    es_categories = [c["key"] for c in aggs.get("categories", {}).get("values", {}).get("buckets", [])]
+
+
     # Vector search
     vector_results = vector_search(qdrant, query, limit=size, filters=filters)
+
+    if total_docs_after_filter == 0 and not keyword_hits:
+        brands = set()
+        categories = set()
+
+        for r in vector_results:
+            payload = r.payload or {}
+
+            if payload.get("brand"):
+                brands.add(payload["brand"])
+
+            if payload.get("category"):
+                categories.add(payload["category"])
+
+        es_brands = sorted(list(brands))
+        es_categories = sorted(list(categories))
 
     # Merge ES + Vector
     merged = merge_results(keyword_hits, vector_results)
@@ -472,4 +551,8 @@ async def get_product_auto_complete_v3(
         "size": size,
         "total_pages": (total_docs_after_filter + size - 1) // size,
         "results": results,
+        "facets": {
+            "brands": es_brands,
+            "categories": es_categories,
+        },
     }
