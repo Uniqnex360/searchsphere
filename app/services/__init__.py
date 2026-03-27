@@ -16,4 +16,6 @@ from .product import (
     sync_product_with_es_qdrant,
     autocomplete_with_es_qdrant,
     get_product_auto_complete_v3,
+    create_product_mapping,
+    get_product_auto_complete_v4,
 )

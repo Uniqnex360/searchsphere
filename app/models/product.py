@@ -1,8 +1,9 @@
-from app.models import BaseModel, BaseURLModel
-
-from sqlmodel import Field, Relationship
+from sqlmodel import Field, Relationship, Column
 from sqlalchemy import UniqueConstraint
-from typing import List, Optional
+from sqlalchemy.dialects.postgresql import JSON
+from typing import List, Optional, Dict, Any
+
+from app.models import BaseModel, BaseURLModel
 
 
 class Product(BaseModel, table=True):
@@ -110,3 +111,17 @@ class ProductAttribute(BaseModel, table=True):
     validation_uom: Optional[str] = None
 
     product: Product = Relationship(back_populates="attributes")
+
+
+class ProductSearchResult(BaseModel, table=True):
+    """Stores search keywords and results for an API query"""
+
+    url: Optional[str] = Field(default=None, nullable=True)
+    total_result: Optional[int] = Field(default=None, nullable=True)
+    query: Optional[Dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
+    )
+
+    result: Optional[Dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
+    )

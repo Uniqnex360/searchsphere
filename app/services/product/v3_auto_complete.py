@@ -97,8 +97,22 @@ SYNONYMS = {
     "tshirt": ["t-shirt", "tee"],
     "phone": ["mobile", "smartphone"],
 }
+STOP_WORDS = {
+    "the",
+    "is",
+    "in",
+    "at",
+    "for",
+    "and",
+    "of",
+    "a",
+    "an",
+}
 
 
+# -----------------------------
+# QUERY PROCESSOR
+# -----------------------------
 async def query_processor(query: str) -> Dict[str, Any]:
     # 1. normalize base query
     query_lower = query.lower().strip()
@@ -116,10 +130,11 @@ async def query_processor(query: str) -> Dict[str, Any]:
         query_lower,
     )
 
-    # 4. build safe tokens (DO NOT use for ranking alone)
-    tokens = re.findall(r"\d+\.?\d+|[a-zA-Z]+", query_lower)
+    # 4. build safe tokens (remove stop words here!)
+    raw_tokens = re.findall(r"\d+\.?\d+|[a-zA-Z]+", query_lower)
+    tokens = [t for t in raw_tokens if t not in STOP_WORDS]  # <-- STOP WORD FILTERING
 
-    # 5. build normalized number-unit phrases (IMPORTANT FIX)
+    # 5. build normalized number-unit phrases
     number_unit_phrases: List[str] = []
     for num, unit in numbers:
         number_unit_phrases.append(f"{num}{unit}")  # 3.2mm
@@ -160,6 +175,7 @@ async def expand_query(parsed: dict) -> list:
     for cat in parsed.get("categories", []):
         expanded_terms.add(cat)
 
+    # Add number-unit phrases
     for phrase in parsed.get("number_unit_phrases", []):
         expanded_terms.add(phrase)
 
@@ -384,7 +400,6 @@ async def get_product_auto_complete_v3(
 ):
     query_dict = await query_processor(query)
     expanded_query = await expand_query(query_dict)
-
     es_query_body = build_es_query_body(
         query, filters=filters, expanded_terms=expanded_query
     )
@@ -493,14 +508,17 @@ async def get_product_auto_complete_v3(
     keyword_hits = es_resp.get("hits", {}).get("hits", [])
 
     aggs = es_resp.get("aggregations", {})
-    
 
     # es_brands = [b["key"] for b in aggs.get("brands", {}).get("buckets", [])]
-    es_brands = [b["key"] for b in aggs.get("brands", {}).get("values", {}).get("buckets", [])]
+    es_brands = [
+        b["key"] for b in aggs.get("brands", {}).get("values", {}).get("buckets", [])
+    ]
 
     # es_categories = [c["key"] for c in aggs.get("categories", {}).get("buckets", [])]
-    es_categories = [c["key"] for c in aggs.get("categories", {}).get("values", {}).get("buckets", [])]
-
+    es_categories = [
+        c["key"]
+        for c in aggs.get("categories", {}).get("values", {}).get("buckets", [])
+    ]
 
     # Vector search
     vector_results = vector_search(qdrant, query, limit=size, filters=filters)
@@ -551,6 +569,7 @@ async def get_product_auto_complete_v3(
         "size": size,
         "total_pages": (total_docs_after_filter + size - 1) // size,
         "results": results,
+        "processed_query": expanded_query,
         "facets": {
             "brands": es_brands,
             "categories": es_categories,

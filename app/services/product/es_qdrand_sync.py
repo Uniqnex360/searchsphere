@@ -51,6 +51,7 @@ async def sync_product_with_es_qdrant(
         "country_of_origin": product.country_of_origin,
         "warranty": product.warranty,
         "industry_name": product.industry.industry_name if product.industry else None,
+        "category": product.category.name if product.category else None,
         "category_name": product.category.name if product.category else None,
         # float
         "weight": product.weight,

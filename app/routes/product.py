@@ -3,15 +3,19 @@ from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func
 from sqlalchemy.orm import selectinload
-from fastapi import APIRouter, Depends, Query
+
+from fastapi import APIRouter, Depends, Query, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
-from app.models import Product, Category
+
+from app.models import Product, Category, ProductSearchResult
 from app.services import (
     autocomplete_products,
     autocomplete_product_vector,
     autocomplete_with_es_qdrant,
     get_product_auto_complete_v3,
+    get_product_auto_complete_v4,
+    create_product_mapping,
 )
 from app.es_client import get_es
 from app.database import get_session
@@ -139,8 +143,23 @@ async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
     return {"success": True, "data": product_data}
 
 
+async def save_search_result(
+    session: AsyncSession, query_data: dict, data: dict, url: str
+):
+    obj = ProductSearchResult(
+        query=query_data,
+        result=data,
+        url=str(url),
+        total_result=data.get("total_docs_after_filter", None),
+    )
+    session.add(obj)
+    await session.commit()
+
+
 @router.get("/product/v3/auto-complete/")
 async def autocomplate_product_vector(
+    request: Request,
+    background_tasks: BackgroundTasks,
     q: str = "",
     brand_: Optional[List[str]] = Query(None, alias="brand[]"),
     category_: Optional[List[str]] = Query(None, alias="category[]"),
@@ -148,6 +167,7 @@ async def autocomplate_product_vector(
     price_max: Optional[float] = Query(None),
     es: Elasticsearch = Depends(get_es),
     qdrant: Elasticsearch = Depends(get_qdrant_client),
+    session: AsyncSession = Depends(get_session),
     sort_by: str | None = None,
     sort_order: str = "desc",
     page: int = 1,
@@ -160,7 +180,90 @@ async def autocomplate_product_vector(
         "price_max": price_max,
     }
     data = await get_product_auto_complete_v3(
-        es, qdrant, q, filters=filters, sort_by=sort_by, sort_order=sort_order, page=page
+        es,
+        qdrant,
+        q,
+        filters=filters,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
     )
 
+    query_payload = {
+        "q": q,
+        "processed_query": data.get("processed_query"),
+        "filters": filters,
+        "page": page,
+    }
+
+    background_tasks.add_task(
+        save_search_result,
+        session,
+        query_payload,
+        data,
+        request.headers.get("X-FE-URL", str(request.url)),
+    )
+    return {"total": len(data), "data": data}
+
+
+@router.post("/product/es-mapping/create/")
+async def create_elastic_search_product_mapping(
+    es: Elasticsearch = Depends(get_es),
+):
+    try:
+        create_product_mapping(es)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    return {"success": True}
+
+
+@router.get("/product/v4/auto-complete/")
+async def autocomplate_product_vector(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    q: str = "",
+    brand_: Optional[List[str]] = Query(None, alias="brand[]"),
+    category_: Optional[List[str]] = Query(None, alias="category[]"),
+    price_min: Optional[float] = Query(None),
+    price_max: Optional[float] = Query(None),
+    es: Elasticsearch = Depends(get_es),
+    qdrant: Elasticsearch = Depends(get_qdrant_client),
+    session: AsyncSession = Depends(get_session),
+    sort_by: str | None = None,
+    sort_order: str = "desc",
+    page: int = 1,
+):
+
+    filters = {
+        "brand": brand_,
+        "category": category_,
+        "price_min": price_min,
+        "price_max": price_max,
+    }
+    data = await get_product_auto_complete_v4(
+        es,
+        q,
+        brand=filters.get("brand"),
+        category=filters.get("category"),
+        min_price=filters.get("price_min"),
+        max_price=filters.get("price_max"),
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+    )
+
+    query_payload = {
+        "q": q,
+        "processed_query": data.get("processed_query"),
+        "filters": filters,
+        "page": page,
+    }
+
+    background_tasks.add_task(
+        save_search_result,
+        session,
+        query_payload,
+        data,
+        request.headers.get("X-FE-URL", str(request.url)),
+    )
     return {"total": len(data), "data": data}

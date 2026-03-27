@@ -26,6 +26,7 @@ from app.services import (
     sync_with_vector_product,
     sync_product_with_es_qdrant,
     get_qdrant_client,
+    ESCollection,
 )
 from app.es_client import get_es
 
@@ -64,7 +65,7 @@ async def upload_products_csv(
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files allowed")
 
-    es_service = ElasticsearchService(es, "product_vector")
+    es_service = ElasticsearchService(es, ESCollection.PRODUCT_V2.value)
 
     # ---- CSV READ ----
     df = pd.read_csv(
