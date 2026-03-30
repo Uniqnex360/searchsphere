@@ -155,7 +155,7 @@ async def save_search_result(
     query = (query_data.get("q") or "").strip()
     if not query:
         return
-    
+
     debug_tokens = {}
 
     # -----------------------------
@@ -399,3 +399,93 @@ async def get_product_search_keywords_list(
             "pages": (total + limit - 1) // limit,
         },
     }
+
+
+# async def google_like_search_tokens(
+#     es: Elasticsearch,
+#     query: str,
+#     index: str,
+#     size: int = 10,
+# ) -> dict:
+#     """
+#     Simulates a Google-like search:
+#     - Searches across product_name, brand, category, attributes, features
+#     - Uses ngram + fuzzy matching
+#     - Prints tokens used for matching
+#     """
+
+#     # -----------------------------
+#     # Fields to search (ngram for partial/fuzzy matching)
+#     # -----------------------------
+#     search_fields = [
+#         "product_name.ngram",
+#         "short_description.ngram",
+#         "long_description.ngram",
+#         "brand.ngram",
+#         "category.ngram",
+#         "attributes.name.ngram",
+#         "attributes.value.ngram",
+#         "features.value.ngram",
+#     ]
+
+#     # -----------------------------
+#     # Multi-match query
+#     # -----------------------------
+#     body = {
+#         "size": size,
+#         "_source": ["product_name", "category", "brand", "attributes", "features"],
+#         "query": {
+#             "multi_match": {
+#                 "query": query,
+#                 "fields": search_fields,
+#                 "fuzziness": "AUTO",
+#                 "type": "best_fields",
+#                 "operator": "and",
+#             }
+#         },
+#         "highlight": {
+#             "pre_tags": ["<b>"],
+#             "post_tags": ["</b>"],
+#             "fields": {field: {} for field in search_fields},
+#         },
+#     }
+
+#     resp = es.search(index=index, body=body)
+
+#     results = []
+#     tokens_used = set()
+
+#     for hit in resp.get("hits", {}).get("hits", []):
+#         # Collect highlighted tokens
+#         highlight = hit.get("highlight", {})
+#         for field_tokens in highlight.values():
+#             for token in field_tokens:
+#                 tokens_used.add(token)
+
+#         # Collect results
+#         results.append(
+#             {
+#                 "id": hit["_id"],
+#                 "score": hit["_score"],
+#                 "name": hit["_source"].get("product_name"),
+#                 "brand": hit["_source"].get("brand"),
+#                 "category": hit["_source"].get("category"),
+#             }
+#         )
+
+#     return {
+#         "total": resp.get("hits", {}).get("total", {}).get("value", 0),
+#         "results": results,
+#         "tokens_used": list(tokens_used),
+#     }
+
+
+# @router.get("/product/v5/auto-complete/")
+# async def product_autosuggest_v5(es: Elasticsearch = Depends(get_es), q: str = ""):
+#     fields = ["category.keyword", "brand.keyword", "attributes.name.keyword"]
+#     suggestions = await google_like_search_tokens(
+#         es,
+#         q,
+#         ESCollection.PRODUCT_V2.value,
+#     )
+#     return suggestions

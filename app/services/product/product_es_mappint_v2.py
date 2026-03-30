@@ -471,3 +471,4 @@ async def get_product_auto_complete_v4(
         "suggest": suggestions,
         "facets": {"brands": brand_list, "categories": category_list},
     }
+
