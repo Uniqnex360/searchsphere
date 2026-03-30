@@ -1,7 +1,7 @@
 from typing import Optional, List
 from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select, func
+from sqlmodel import select, func, desc
 from sqlalchemy.orm import selectinload
 
 from fastapi import APIRouter, Depends, Query, BackgroundTasks, Request
@@ -10,6 +10,7 @@ from fastapi.encoders import jsonable_encoder
 
 from app.models import Product, Category, ProductSearchResult
 from app.services import (
+    ESCollection,
     autocomplete_products,
     autocomplete_product_vector,
     autocomplete_with_es_qdrant,
@@ -144,16 +145,100 @@ async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
 
 
 async def save_search_result(
-    session: AsyncSession, query_data: dict, data: dict, url: str
+    es: Elasticsearch,
+    session: AsyncSession,
+    query_data: dict,
+    data: dict,
+    url: str,
+    debug: bool = True,
 ):
-    obj = ProductSearchResult(
-        query=query_data,
-        result=data,
-        url=str(url),
-        total_result=data.get("total_docs_after_filter", None),
-    )
-    session.add(obj)
-    await session.commit()
+    query = (query_data.get("q") or "").strip()
+    if not query:
+        return
+    
+    debug_tokens = {}
+
+    # -----------------------------
+    # 🔥 ANALYZE WITH EXPLAIN
+    # -----------------------------
+    async def analyze_with_explain(analyzer_name: str, text: str):
+        try:
+
+            resp = es.indices.analyze(
+                index=ESCollection.PRODUCT_V2.value,
+                body={
+                    "analyzer": analyzer_name,
+                    "text": text,
+                    "explain": True,
+                },
+            )
+
+            # Tokenizer output
+            tokenizer_tokens = [
+                t["token"]
+                for t in resp.get("detail", {}).get("tokenizer", {}).get("tokens", [])
+            ]
+
+            # Token filter stages
+            filters_output = {}
+            for f in resp.get("detail", {}).get("tokenfilters", []):
+                fname = f.get("name")
+                tokens = [t["token"] for t in f.get("tokens", [])]
+                filters_output[fname] = tokens
+
+            # Final tokens
+            final_tokens = [t["token"] for t in resp.get("tokens", [])]
+
+            return {
+                "tokenizer": tokenizer_tokens,
+                "filters": filters_output,
+                "final": final_tokens,
+            }
+
+        except Exception as e:
+            return None
+
+    # -----------------------------
+    # 🔥 RUN DEBUG ANALYSIS
+    # -----------------------------
+    if debug and query:
+        try:
+            debug_tokens = {
+                "product_name_index": await analyze_with_explain(
+                    "custom_text_analyzer", query
+                ),
+                "product_name_search": await analyze_with_explain(
+                    "custom_search_analyzer", query
+                ),
+                "product_name_ngram": await analyze_with_explain(
+                    "autocomplete_analyzer", query
+                ),
+            }
+
+            # Remove failed ones
+            debug_tokens = {k: v for k, v in debug_tokens.items() if v is not None}
+
+        except Exception as e:
+
+            debug_tokens = {"error": str(e)}
+
+    # -----------------------------
+    # 💾 SAVE TO DB
+    # -----------------------------
+    query_data["tokens"] = debug_tokens if debug else None
+    try:
+        obj = ProductSearchResult(
+            query=query_data,
+            result=data,
+            url=str(url),
+            total_result=data.get("total_docs_after_filter", None),
+        )
+
+        session.add(obj)
+        await session.commit()
+
+    except Exception as e:
+        await session.rollback()
 
 
 @router.get("/product/v3/auto-complete/")
@@ -261,9 +346,56 @@ async def autocomplate_product_vector(
 
     background_tasks.add_task(
         save_search_result,
+        es,
         session,
         query_payload,
         data,
         request.headers.get("X-FE-URL", str(request.url)),
     )
     return {"total": len(data), "data": data}
+
+
+def get_pagination_params(request: Request):
+    try:
+        page = int(request.query_params.get("page", 1))
+        limit = int(request.query_params.get("limit", 50))
+    except ValueError:
+        page, limit = 1, 40
+
+    page = max(page, 1)
+    limit = min(max(limit, 1), 100)
+
+    return page, limit
+
+
+@router.get("/product/search/keywords/")
+async def get_product_search_keywords_list(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    page, limit = get_pagination_params(request)
+    offset = (page - 1) * limit
+
+    # ✅ total count
+    total_result = await db.exec(select(func.count()).select_from(ProductSearchResult))
+    total = total_result.one()  # ✅ FIXED
+
+    # ✅ main query
+    result = await db.exec(
+        select(ProductSearchResult)
+        .order_by(ProductSearchResult.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    data = result.all()  # ✅ IMPORTANT: no scalars() for SQLModel
+
+    return {
+        "data": data,
+        "meta": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "pages": (total + limit - 1) // limit,
+        },
+    }

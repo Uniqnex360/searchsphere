@@ -126,7 +126,26 @@ ATTRIBUTE_MAPPING = {
 # -------------------------------
 SETTINGS_MAPPING = {
     "analysis": {
-        "filter": {"english_stop": {"type": "stop", "stopwords": "_english_"}},
+        "tokenizer": {
+            "edge_ngram_tokenizer": {
+                "type": "edge_ngram",
+                "min_gram": 2,
+                "max_gram": 20,
+                "token_chars": ["letter", "digit"],
+            }
+        },
+        "filter": {
+            "english_stop": {"type": "stop", "stopwords": "_english_"},
+            "word_delimiter_graph_filter": {
+                "type": "word_delimiter_graph",
+                "preserve_original": True,
+                "split_on_case_change": True,
+                "split_on_numerics": True,
+                "catenate_all": False,
+                "catenate_numbers": False,
+                "generate_number_parts": True,
+            },
+        },
         "analyzer": {
             "custom_text_analyzer": {
                 "tokenizer": "standard",
@@ -150,25 +169,6 @@ SETTINGS_MAPPING = {
                 "tokenizer": "edge_ngram_tokenizer",
                 "filter": ["lowercase", "asciifolding"],
             },
-        },
-        "filter": {
-            "word_delimiter_graph_filter": {
-                "type": "word_delimiter_graph",
-                "preserve_original": True,  # keeps original token
-                "split_on_case_change": True,
-                "split_on_numerics": True,
-                "catenate_all": False,
-                "catenate_numbers": False,
-                "generate_number_parts": True,
-            }
-        },
-        "tokenizer": {
-            "edge_ngram_tokenizer": {
-                "type": "edge_ngram",
-                "min_gram": 2,
-                "max_gram": 20,
-                "token_chars": ["letter", "digit"],
-            }
         },
     }
 }
