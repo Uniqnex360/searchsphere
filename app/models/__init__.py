@@ -4,8 +4,10 @@ from .common import MPTTBase
 
 from .industry import Industry
 from .category import Category
+from .brand import Brand
 from .product import (
     Product,
+    ProductType,
     ProductImage,
     ProductVideo,
     ProductDocument,

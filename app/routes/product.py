@@ -368,27 +368,117 @@ def get_pagination_params(request: Request):
     return page, limit
 
 
+from app.services import sync_products_to_es, ElasticsearchService
+
+
+@router.get("/product/sync/es/")
+async def sync_product_with_elastic_serch(
+    session: AsyncSession = Depends(get_session),
+    es: Elasticsearch = Depends(get_es),
+):
+
+    es_service = ElasticsearchService(es, ESCollection.PRODUCT_V2.value)
+
+    await sync_products_to_es(session=session, es_service=es_service, batch_size=300)
+
+    return {"success": True}
+
+
+from sqlalchemy import select, func, desc, asc, cast, String, nulls_last, case
+from sqlalchemy.sql.sqltypes import String
+
+
 @router.get("/product/search/keywords/")
 async def get_product_search_keywords_list(
     request: Request,
     db: AsyncSession = Depends(get_session),
 ):
+    # Pagination
     page, limit = get_pagination_params(request)
     offset = (page - 1) * limit
 
-    # ✅ total count
-    total_result = await db.exec(select(func.count()).select_from(ProductSearchResult))
-    total = total_result.one()  # ✅ FIXED
+    # Sorting params
+    sort_by = request.query_params.get("sort_by", "created_at")
+    order = request.query_params.get("order", "desc").lower()
+    search_q = request.query_params.get("search")
+    
 
-    # ✅ main query
-    result = await db.exec(
-        select(ProductSearchResult)
-        .order_by(ProductSearchResult.created_at.desc())
+    # Keyword extraction
+    keyword_col = cast(ProductSearchResult.query["q"], String)
+
+    # Base aggregate
+    base_query = select(
+        keyword_col.label("q"),
+        ProductSearchResult.total_result,
+        func.count().label("search_count"),
+        func.max(ProductSearchResult.created_at).label("created_at"),
+        func.max(ProductSearchResult.url).label("url"),
+    ).group_by(keyword_col, ProductSearchResult.total_result)
+    if search_q:
+        base_query = base_query.where(keyword_col.ilike(f"%{search_q}%"))
+
+    subquery = base_query.subquery()
+    cols = subquery.c
+
+    # Total count
+    total_result = await db.exec(select(func.count()).select_from(subquery))
+    total = total_result.one()[0]
+
+    # Sorting logic
+    sort_column_map = {
+        "q": cols.q,
+        "total_result": cols.total_result,
+        "search_count": cols.search_count,
+        "created_at": cols.created_at,
+    }
+    sort_column = sort_column_map.get(sort_by, cols.created_at)
+
+    order_expressions = []
+
+    # If sorting by "q" (string)
+    if sort_by == "q":
+        # Push empty strings last
+        empty_last = case((cols.q == "", 1), else_=0)
+
+        if order == "asc":
+            # First sort by empty_last marker, then by actual text
+            order_expressions = [empty_last.asc(), cols.q.asc()]
+        else:
+            # For descending just sort by text normally
+            order_expressions = [empty_last.asc(), cols.q.desc()]
+    else:
+        # Numeric or timestamp columns
+        if order == "asc":
+            order_expressions = [asc(sort_column).nulls_last()]
+        else:
+            order_expressions = [desc(sort_column).nulls_last()]
+
+    final_query = (
+        select(
+            cols.q,
+            cols.total_result,
+            cols.url,
+            cols.search_count,
+            cols.created_at,
+        )
+        .order_by(*order_expressions)
         .offset(offset)
         .limit(limit)
     )
 
-    data = result.all()  # ✅ IMPORTANT: no scalars() for SQLModel
+    result = await db.exec(final_query)
+    rows = result.all()
+
+    data = [
+        {
+            "q": row.q,
+            "total_result": row.total_result,
+            "url": row.url,
+            "search_count": row.search_count,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
 
     return {
         "data": data,
@@ -399,93 +489,3 @@ async def get_product_search_keywords_list(
             "pages": (total + limit - 1) // limit,
         },
     }
-
-
-# async def google_like_search_tokens(
-#     es: Elasticsearch,
-#     query: str,
-#     index: str,
-#     size: int = 10,
-# ) -> dict:
-#     """
-#     Simulates a Google-like search:
-#     - Searches across product_name, brand, category, attributes, features
-#     - Uses ngram + fuzzy matching
-#     - Prints tokens used for matching
-#     """
-
-#     # -----------------------------
-#     # Fields to search (ngram for partial/fuzzy matching)
-#     # -----------------------------
-#     search_fields = [
-#         "product_name.ngram",
-#         "short_description.ngram",
-#         "long_description.ngram",
-#         "brand.ngram",
-#         "category.ngram",
-#         "attributes.name.ngram",
-#         "attributes.value.ngram",
-#         "features.value.ngram",
-#     ]
-
-#     # -----------------------------
-#     # Multi-match query
-#     # -----------------------------
-#     body = {
-#         "size": size,
-#         "_source": ["product_name", "category", "brand", "attributes", "features"],
-#         "query": {
-#             "multi_match": {
-#                 "query": query,
-#                 "fields": search_fields,
-#                 "fuzziness": "AUTO",
-#                 "type": "best_fields",
-#                 "operator": "and",
-#             }
-#         },
-#         "highlight": {
-#             "pre_tags": ["<b>"],
-#             "post_tags": ["</b>"],
-#             "fields": {field: {} for field in search_fields},
-#         },
-#     }
-
-#     resp = es.search(index=index, body=body)
-
-#     results = []
-#     tokens_used = set()
-
-#     for hit in resp.get("hits", {}).get("hits", []):
-#         # Collect highlighted tokens
-#         highlight = hit.get("highlight", {})
-#         for field_tokens in highlight.values():
-#             for token in field_tokens:
-#                 tokens_used.add(token)
-
-#         # Collect results
-#         results.append(
-#             {
-#                 "id": hit["_id"],
-#                 "score": hit["_score"],
-#                 "name": hit["_source"].get("product_name"),
-#                 "brand": hit["_source"].get("brand"),
-#                 "category": hit["_source"].get("category"),
-#             }
-#         )
-
-#     return {
-#         "total": resp.get("hits", {}).get("total", {}).get("value", 0),
-#         "results": results,
-#         "tokens_used": list(tokens_used),
-#     }
-
-
-# @router.get("/product/v5/auto-complete/")
-# async def product_autosuggest_v5(es: Elasticsearch = Depends(get_es), q: str = ""):
-#     fields = ["category.keyword", "brand.keyword", "attributes.name.keyword"]
-#     suggestions = await google_like_search_tokens(
-#         es,
-#         q,
-#         ESCollection.PRODUCT_V2.value,
-#     )
-#     return suggestions

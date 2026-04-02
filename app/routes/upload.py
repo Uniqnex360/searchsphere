@@ -1,5 +1,11 @@
 import time
+import os
+import time
+import tempfile
+import polars as pl
 import pandas as pd
+
+from sqlalchemy.dialects.postgresql import insert
 from elasticsearch import Elasticsearch
 from qdrant_client import QdrantClient
 from sqlalchemy import text, tuple_
@@ -17,6 +23,8 @@ from app.models import (
     ProductAttribute,
     Industry,
     Category,
+    Brand,
+    ProductType,
 )
 from app.services import (
     CategoryService,
@@ -467,16 +475,6 @@ async def upload_products_csv_v2(
         # ---- COMMIT PER ROW ----
         await session.commit()
 
-        # ---- BACKGROUND TASK ----
-        background_tasks.add_task(
-            sync_product_with_es_qdrant,
-            es_service,
-            product.id,
-            product,
-            qdrant,
-            session,
-        )
-
     return {
         "status": "success",
         "products_inserted": inserted,
@@ -484,148 +482,350 @@ async def upload_products_csv_v2(
     }
 
 
+async def handle_industry(
+    df: pl.DataFrame,
+    session: AsyncSession,
+) -> dict:
+    """get all the unique industry from the csv file and create or update them and return the indsutry map"""
+
+    # ============================================================
+    # 🔥 STEP 1: Extract ALL unique industries (once)
+    # ============================================================
+    all_industries = df.get_column("industry_name").drop_nulls().unique().to_list()
+
+    # ============================================================
+    # 🔥 STEP 2: Fetch existing industries
+    # ============================================================
+    result = await session.exec(
+        select(Industry).where(Industry.industry_name.in_(all_industries))
+    )
+    existing = result.scalars().all()
+
+    industry_map = {ind.industry_name: ind.id for ind in existing}
+
+    # ============================================================
+    # 🔥 STEP 3: Insert missing industries (UPSERT)
+    # ============================================================
+    missing = [name for name in all_industries if name not in industry_map]
+
+    if missing:
+        stmt = (
+            insert(Industry)
+            .values([{"industry_name": name} for name in missing])
+            .on_conflict_do_nothing(index_elements=["industry_name"])
+        )
+
+        await session.exec(stmt)
+        await session.commit()
+
+        # fetch newly created
+        result = await session.exec(
+            select(Industry).where(Industry.industry_name.in_(missing))
+        )
+        new_rows = result.scalars().all()
+
+        for ind in new_rows:
+            industry_map[ind.industry_name] = ind.id
+
+    return industry_map
+
+
+async def handle_brand(
+    df: pl.DataFrame,
+    session: AsyncSession,
+) -> dict:
+    """get all the unique brand from the csv file create or them and return brand map"""
+
+    all_brands = df.get_column("brand").drop_nulls().unique().to_list()
+
+    result = await session.exec(select(Brand).where(Brand.brand_name.in_(all_brands)))
+    existing = result.scalars().all()
+
+    brand_map = {obj.brand_name: obj.id for obj in existing}
+
+    missing = [name for name in all_brands if name not in brand_map]
+
+    if missing:
+        stmt = (
+            insert(Brand)
+            .values([{"brand_name": name} for name in missing])
+            .on_conflict_do_nothing(index_elements=["brand_name"])
+        )
+
+        await session.exec(stmt)
+        await session.commit()
+
+        # fetch newly created
+        result = await session.exec(select(Brand).where(Brand.brand_name.in_(missing)))
+        new_rows = result.scalars().all()
+
+        for brand_obj in new_rows:
+            brand_map[brand_obj.brand_name] = brand_obj.id
+
+    return brand_map
+
+
+async def handle_product_type(
+    df: pl.DataFrame,
+    session: AsyncSession,
+) -> dict:
+    """get all the product types from the csv file and creat or update return product type map"""
+
+    all_product_types = df.get_column("Product Type").drop_nulls().unique().to_list()
+    result = await session.exec(
+        select(ProductType).where(ProductType.product_type.in_(all_product_types))
+    )
+    existing = result.scalars().all()
+    product_type_map = {obj.product_type.strip().lower(): obj.id for obj in existing}
+
+    missing = [
+        name
+        for name in all_product_types
+        if name and name.strip().lower() not in product_type_map
+    ]
+
+    if missing:
+        stmt = (
+            insert(ProductType)
+            .values([{"product_type": name} for name in missing])
+            .on_conflict_do_nothing(index_elements=["product_type"])
+        )
+
+        await session.exec(stmt)
+        await session.commit()
+
+        # fetch newly created
+        result = await session.exec(
+            select(ProductType).where(ProductType.product_type.in_(missing))
+        )
+        new_rows = result.scalars().all()
+
+        for obj in new_rows:
+            product_type_map[obj.product_type.strip().lower()] = obj.id
+
+    return product_type_map
+
+
+async def handle_category(
+    df: pl.DataFrame,
+    session: AsyncSession,
+    industry_map: dict,
+    category_service,
+) -> dict:
+    """
+    Build all categories from CSV in bulk and return mapping:
+    (industry_name, taxonomy) -> category_obj
+    """
+
+    # ============================================================
+    # 🔥 STEP 1: Extract unique (industry, taxonomy)
+    # ============================================================
+    unique_pairs = (
+        df.select(["industry_name", "taxonomy"]).drop_nulls().unique().to_dicts()
+    )
+
+    category_cache = {}
+
+    # ============================================================
+    # 🔥 STEP 2: Process each unique path ONCE
+    # ============================================================
+    for item in unique_pairs:
+        industry_name = item["industry_name"]
+        taxonomy = item["taxonomy"]
+
+        if not taxonomy:
+            continue
+
+        cache_key = (industry_name, taxonomy)
+
+        if cache_key in category_cache:
+            continue
+
+        # ✅ Resolve industry_id from prebuilt map (NO DB hit)
+        industry_id = industry_map.get(industry_name)
+
+        if not industry_id:
+            continue  # or raise error
+
+        # ========================================================
+        # 🔥 Build category path (optimized)
+        # ========================================================
+        parts = [p.strip() for p in taxonomy.split(">") if p.strip()]
+
+        parent = None
+        last_node = None
+
+        for level_name in parts:
+            node = await category_service.get_or_create_node(
+                db=session,
+                name=level_name,
+                industry_id=industry_id,
+                parent=parent,
+            )
+            parent = node
+            last_node = node
+
+        category_cache[cache_key] = last_node
+
+    return category_cache
+
 
 @router.post("/v3/upload-products-csv/")
 async def upload_products_csv_v3(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    batch_size: int = 100,
     session: AsyncSession = Depends(get_session),
     es: Elasticsearch = Depends(get_es),
     qdrant: QdrantClient = Depends(get_qdrant_client),
 ):
+    start_total = time.perf_counter()
+
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files allowed")
 
-    print("📂 Reading CSV file...")
-
+    batch_size = 200
     es_service = ElasticsearchService(es, ESCollection.PRODUCT_V2.value)
 
-    df = pd.read_csv(
-        file.file,
-        sep=",",
-        engine="python",
-        encoding="latin-1",
-        dtype=str,
-        skipinitialspace=True,
-    )
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+        tmp.write(await file.read())
+        temp_path = tmp.name
 
-    df = df.where(pd.notna(df), None)
-
-    total_rows = len(df)
-    print(f"📊 Total rows in CSV: {total_rows}")
-
-    inserted, updated, failed = 0, 0, 0
-
-    category_service = CategoryService(Category)
-    industry_cache = {}
-    category_cache = {}
-
-    PRODUCT_FIELDS = {
-        "sku",
-        "brand",
-        "gtin",
-        "ean",
-        "upc",
-        "taxonomy",
-        "country_of_origin",
-        "warranty",
-        "weight_unit",
-        "dimension_unit",
-        "currency",
-        "stock_status",
-        "vendor_name",
-        "vendor_sku",
-        "short_description",
-        "long_description",
-        "meta_title",
-        "meta_description",
-        "search_keywords",
-        "certification",
-        "safety_standard",
-        "hazardous_material",
-        "prop65_warning",
-    }
-
-    # 🔥 BATCH LOOP
-    for batch_no, start in enumerate(range(0, total_rows, batch_size), start=1):
-        end = min(start + batch_size, total_rows)
-        batch_df = df.iloc[start:end]
-
-        print(f"\n🚀 ===== BATCH {batch_no} START =====")
-        print(f"📦 Processing rows {start} → {end-1}")
-
-        # 🔥 STEP 1: BULK FETCH EXISTING PRODUCTS
-        batch_keys = []
-
-        for row in batch_df.itertuples(index=False):
-            mpn = clean(getattr(row, "mpn", None))
-            product_name = clean(getattr(row, "product_name", None))
-
-            if mpn and product_name:
-                batch_keys.append((mpn, product_name))
-
-        print(f"🔍 Fetching existing products for {len(batch_keys)} keys...")
-
-        stmt = select(Product).where(
-            tuple_(Product.mpn, Product.product_name).in_(batch_keys)
+    try:
+        lf = pl.scan_csv(
+            temp_path,
+            infer_schema_length=0,
+            schema_overrides={"mpn": pl.Utf8, "upc": pl.Utf8},
         )
 
-        result = await session.execute(stmt)
-        existing_products = result.scalars().all()
+        df = lf.collect(streaming=True)
+        total_rows = df.height
+        total_batches = (total_rows + batch_size - 1) // batch_size
 
-        existing_map = {(p.mpn, p.product_name): p for p in existing_products}
+        print(f"🚀 Total rows: {total_rows}, batches: {total_batches}")
 
-        print(f"✅ Found {len(existing_products)} existing products in DB")
+        inserted, updated = 0, 0
+        category_service = CategoryService(Category)
 
-        products_to_sync = []
+        # 🔥 STEP 1: HANDLE INDUSTRY (BULK)
+        industry_start = time.perf_counter()
+        industry_map = await handle_industry(df, session)
+        print(f"⏱ industry time: {round(time.perf_counter() - industry_start,2)}s")
 
-        # 🔥 ROW LOOP
-        for idx, row in enumerate(batch_df.itertuples(index=False), start=1):
-            try:
-                row_dict = {k: clean(getattr(row, k)) for k in row._fields}
+        # 🔥 STEP 2: HANDLE CATEGORY (BULK)
+        category_start = time.perf_counter()
+        category_map = await handle_category(
+            df=df,
+            session=session,
+            industry_map=industry_map,
+            category_service=category_service,
+        )
+        print(f"⏱ category time: {round(time.perf_counter() - category_start,2)}s")
+
+        # 🔥 STEP 3: HANDLE BRAND (BULK)
+        brand_start = time.perf_counter()
+        brand_map = await handle_brand(df=df, session=session)
+        print(f"⏱ brand time: {round(time.perf_counter() - brand_start,2)}s")
+
+        # 🔥 STEP 4: HANDLE Product Type (BULK)
+        product_type_start = time.perf_counter()
+        product_type_map = await handle_product_type(df=df, session=session)
+        print(
+            f"⏱ product type time: {round(time.perf_counter() - product_type_start,2)}s"
+        )
+
+        # ============================
+        # 🔁 BATCH LOOP
+        # ============================
+        for batch_idx in range(total_batches):
+            batch_start_time = time.perf_counter()
+
+            start = batch_idx * batch_size
+            end = min(start + batch_size, total_rows)
+            batch_df = df.slice(start, end - start)
+
+            print(f"\n📦 Batch {batch_idx+1}/{total_batches} rows {start}-{end}")
+
+            rows = batch_df.to_dicts()
+
+            # 🔥 DEDUPE INSIDE BATCH (CRITICAL)
+            seen_mpns = set()
+            filtered_rows = []
+
+            for r in rows:
+                mpn = r.get("mpn")
+                if mpn:
+                    if mpn in seen_mpns:
+                        continue
+                    seen_mpns.add(mpn)
+                filtered_rows.append(r)
+
+            rows = filtered_rows
+
+            # ---- FETCH EXISTING PRODUCTS (mpn-based) ----
+            mpns = set(r.get("mpn") for r in rows if r.get("mpn"))
+
+            stmt = select(Product).where(Product.mpn.in_(mpns))
+            result = await session.execute(stmt)
+            existing_products = result.scalars().all()
+
+            product_map = {p.mpn: p for p in existing_products}
+
+            products_to_delete_relations = []
+            products_for_bg_task = []
+
+            batch_inserted = 0
+            batch_updated = 0
+
+            # ============================
+            # 🔁 PROCESS ROWS
+            # ============================
+            for row_dict in rows:
+                row_dict = {k: clean(v) for k, v in row_dict.items()}
 
                 mpn = row_dict.get("mpn")
                 product_name = row_dict.get("product_name")
 
-                print(f"\n➡️ Row {idx} | MPN: {mpn}")
-
-                if not mpn or not product_name:
-                    print("⚠️ Skipped (missing mpn/product_name)")
-                    failed += 1
-                    continue
-
-                existing_product = existing_map.get((mpn, product_name))
+                existing_product = product_map.get(mpn)
 
                 if existing_product:
-                    print("🔄 Updating existing product")
                     product = existing_product
+                    batch_updated += 1
                     updated += 1
-
-                    # delete relations
-                    for tbl in [
-                        "productimage",
-                        "productvideo",
-                        "productdocument",
-                        "productfeature",
-                        "productattribute",
-                    ]:
-                        await session.execute(
-                            text(f"DELETE FROM {tbl} WHERE product_id = :pid"),
-                            {"pid": product.id},
-                        )
-
+                    products_to_delete_relations.append(product.id)
                 else:
-                    print("🆕 Creating new product")
                     product = Product(mpn=mpn, product_name=product_name)
+                    session.add(product)
+                    batch_inserted += 1
                     inserted += 1
 
-                # FIELDS
-                for field in PRODUCT_FIELDS:
-                    if hasattr(product, field):
-                        setattr(product, field, row_dict.get(field))
+                # ---- FIELDS ----
+                for field in [
+                    "sku",
+                    "gtin",
+                    "ean",
+                    "upc",
+                    "taxonomy",
+                    "country_of_origin",
+                    "warranty",
+                    "weight_unit",
+                    "dimension_unit",
+                    "currency",
+                    "stock_status",
+                    "vendor_name",
+                    "vendor_sku",
+                    "short_description",
+                    "long_description",
+                    "meta_title",
+                    "meta_description",
+                    "search_keywords",
+                    "certification",
+                    "safety_standard",
+                    "hazardous_material",
+                    "prop65_warning",
+                ]:
+                    setattr(product, field, row_dict.get(field))
 
-                # NUMERIC
+                # ---- NUMERIC ----
                 product.weight = to_float(row_dict.get("weight"))
                 product.length = to_float(row_dict.get("length"))
                 product.width = to_float(row_dict.get("width"))
@@ -636,127 +836,164 @@ async def upload_products_csv_v3(
                 product.special_price = to_float(row_dict.get("special_price"))
                 product.stock_qty = to_int(row_dict.get("stock_qty"))
 
-                # INDUSTRY
+                # ---- INDUSTRY ----
                 industry_name = row_dict.get("industry_name")
+                industry_id = industry_map.get(industry_name)
+                if industry_id:
+                    product.industry_id = industry_id
 
-                if not industry_name:
-                    print("⚠️ Missing industry → skipped")
-                    failed += 1
-                    continue
-
-                if industry_name in industry_cache:
-                    industry_obj = industry_cache[industry_name]
-                else:
-                    print(f"🏭 Creating/fetching industry: {industry_name}")
-                    industry_obj, _ = await get_or_create(
-                        db=session,
-                        model=Industry,
-                        industry_name=industry_name.strip(),
-                    )
-                    industry_cache[industry_name] = industry_obj
-
-                product.industry_id = industry_obj.id
-
-                # CATEGORY
+                # ---- CATEGORY ----
                 taxonomy = row_dict.get("taxonomy")
-                category_key = (industry_obj.industry_name, taxonomy)
+                category_key = (industry_name, taxonomy)
+                category_obj = category_map.get(category_key)
+                if category_obj:
+                    product.category_id = category_obj.id
 
-                if category_key in category_cache:
-                    category_obj = category_cache[category_key]
-                else:
-                    print(f"📂 Creating category: {taxonomy}")
-                    category_obj = await category_service.create_from_path(
-                        session,
-                        industry_name=industry_obj.industry_name,
-                        path=taxonomy,
+                # --- Brand ----
+                brand_name = row_dict.get("brand")
+                brand_id = brand_map.get(brand_name)
+                if brand_id:
+                    product.brand_id = brand_id
+
+                # --- Product Type ----
+                product_type = row_dict.get("Product Type")
+                if product_type:
+                    product_type = product_type.strip().lower()
+                product_type_id = product_type_map.get(product_type)
+                if product_type_id:
+                    product.product_type_id = product_type_id
+
+                products_for_bg_task.append((product, row_dict))
+
+            # ---- FLUSH FIRST (IMPORTANT) ----
+            await session.flush()
+
+            # ---- DELETE OLD RELATIONS (AFTER FLUSH) ----
+            if products_to_delete_relations:
+                for tbl in [
+                    "productimage",
+                    "productvideo",
+                    "productdocument",
+                    "productfeature",
+                    "productattribute",
+                ]:
+                    await session.execute(
+                        text(f"DELETE FROM {tbl} WHERE product_id = ANY(:pids)"),
+                        {"pids": products_to_delete_relations},
                     )
-                    category_cache[category_key] = category_obj
 
-                product.category_id = category_obj.id
+            # ============================
+            # 🔁 ADD RELATIONS
+            # ============================
+            light_relations = []
+            attribute_relations = []
 
-                session.add(product)
-                await session.flush()
+            for product, row_dict in products_for_bg_task:
 
-                # RELATIONS
-                relation_objects = []
-
-                # IMAGES
                 for i in range(1, 9):
-                    name = row_dict.get(f"image_name_{i}")
-                    url = row_dict.get(f"image_url_{i}")
-                    if name and url:
-                        relation_objects.append(
-                            ProductImage(product_id=product.id, name=name, url=url)
-                        )
-
-                # FEATURES
-                for i in range(1, 11):
-                    val = row_dict.get(f"features_{i}")
-                    if val:
-                        relation_objects.append(
-                            ProductFeature(
+                    if row_dict.get(f"image_name_{i}") and row_dict.get(
+                        f"image_url_{i}"
+                    ):
+                        light_relations.append(
+                            ProductImage(
                                 product_id=product.id,
-                                name=f"features_{i}",
-                                value=val,
+                                name=row_dict[f"image_name_{i}"],
+                                url=row_dict[f"image_url_{i}"],
                             )
                         )
 
-                # ATTRIBUTES
+                for i in range(1, 4):
+                    if row_dict.get(f"video_name_{i}") and row_dict.get(
+                        f"video_url_{i}"
+                    ):
+                        light_relations.append(
+                            ProductVideo(
+                                product_id=product.id,
+                                name=row_dict[f"video_name_{i}"],
+                                url=row_dict[f"video_url_{i}"],
+                            )
+                        )
+
+                for i in range(1, 6):
+                    if row_dict.get(f"document_name_{i}") and row_dict.get(
+                        f"document_url_{i}"
+                    ):
+                        light_relations.append(
+                            ProductDocument(
+                                product_id=product.id,
+                                name=row_dict[f"document_name_{i}"],
+                                url=row_dict[f"document_url_{i}"],
+                            )
+                        )
+
+                for i in range(1, 11):
+                    if row_dict.get(f"features_{i}"):
+                        light_relations.append(
+                            ProductFeature(
+                                product_id=product.id,
+                                name=f"features_{i}",
+                                value=row_dict[f"features_{i}"],
+                            )
+                        )
+
                 for i in range(1, 41):
                     name = row_dict.get(f"attribute_name{i}")
-                    if name:
-                        relation_objects.append(
+                    if name and name.strip():
+                        attribute_relations.append(
                             ProductAttribute(
                                 product_id=product.id,
                                 attribute_name=name,
                                 attribute_value=row_dict.get(f"attribute_value{i}"),
                                 attribute_uom=row_dict.get(f"attribute_uom{i}"),
+                                validation_value=row_dict.get(f"validation_value{i}"),
+                                validation_uom=row_dict.get(f"validation_uom{i}"),
                             )
                         )
 
-                print(f"📦 Adding {len(relation_objects)} relations")
+            # ----------------------------
+            # LIGHT RELATIONS (safe)
+            # ----------------------------
+            RELATION_CHUNK_SIZE = 200
 
-                session.add_all(relation_objects)
+            for i in range(0, len(light_relations), RELATION_CHUNK_SIZE):
+                chunk = light_relations[i : i + RELATION_CHUNK_SIZE]
+                session.add_all(chunk)
+                await session.flush()
 
-                products_to_sync.append(product.id)
+            # ----------------------------
+            # ATTRIBUTES (heavy 🔥)
+            # ----------------------------
+            ATTRIBUTE_CHUNK_SIZE = 100  # 🔥 smaller = safer
 
-            except Exception as e:
-                print(f"❌ Row failed: {str(e)}")
-                failed += 1
-                continue
+            for i in range(0, len(attribute_relations), ATTRIBUTE_CHUNK_SIZE):
+                chunk = attribute_relations[i : i + ATTRIBUTE_CHUNK_SIZE]
+                session.add_all(chunk)
+                await session.flush()
 
-        # 🔥 COMMIT
-        try:
-            print(f"💾 Committing batch {batch_no}...")
+            # ---- COMMIT ----
             await session.commit()
-            print(f"✅ Batch {batch_no} committed successfully")
-        except Exception as e:
-            print(f"🔥 Batch {batch_no} failed → rollback: {str(e)}")
-            await session.rollback()
-            failed += len(batch_df)
-            continue
 
-        # 🔥 BACKGROUND TASKS
-        print(f"🔁 Scheduling {len(products_to_sync)} products for ES/Qdrant sync")
 
-        for pid in products_to_sync:
-            background_tasks.add_task(
-                sync_product_with_es_qdrant,
-                es_service,
-                pid,
-                qdrant,
+            batch_time = round(time.perf_counter() - batch_start_time, 2)
+
+            print(
+                f"✅ Batch {batch_idx+1} | "
+                f"Inserted: {batch_inserted} | "
+                f"Updated: {batch_updated} | "
+                f"Time: {batch_time}s"
             )
 
-        print(
-            f"📊 Batch {batch_no} Summary → Inserted: {inserted}, Updated: {updated}, Failed: {failed}"
-        )
-        print(f"🚀 ===== BATCH {batch_no} END =====\n")
+        total_time = round(time.perf_counter() - start_total, 2)
 
-    return {
-        "status": "completed",
-        "total_rows": total_rows,
-        "inserted": inserted,
-        "updated": updated,
-        "failed": failed,
-        "batch_size": batch_size,
-    }
+        print(f"\n🔥 TOTAL TIME: {total_time}s")
+
+        return {
+            "status": "success",
+            "products_inserted": inserted,
+            "products_updated": updated,
+            "total_batches": total_batches,
+            "total_time": total_time,
+        }
+
+    finally:
+        os.remove(temp_path)

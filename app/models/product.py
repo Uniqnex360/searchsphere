@@ -63,10 +63,14 @@ class Product(BaseModel, table=True):
     # FK
     industry_id: int = Field(foreign_key="industry.id")
     category_id: int = Field(foreign_key="category.id")
+    brand_id: Optional[int] = Field(foreign_key="brand.id")
+    product_type_id: Optional[int] = Field(foreign_key="product_type.id")
 
     # Relationships
     industry: Optional["Industry"] = Relationship(back_populates="products")
+    brand: Optional["Brand"] = Relationship(back_populates="products")
     category: Optional["Category"] = Relationship(back_populates="products")
+    product_type: Optional["ProductType"] = Relationship(back_populates="products")
 
     features: List["ProductFeature"] = Relationship(back_populates="product")
     images: List["ProductImage"] = Relationship(back_populates="product")
@@ -124,4 +128,17 @@ class ProductSearchResult(BaseModel, table=True):
 
     result: Optional[Dict[str, Any]] = Field(
         default=None, sa_column=Column(JSON, nullable=True)
+    )
+
+
+class ProductType(BaseModel, table=True):
+    """product type table for entire app"""
+
+    __tablename__ = "product_type"
+
+    product_type: str = Field(index=True, nullable=False, unique=True)
+
+    # Relationships
+    products: List["Product"] = Relationship(
+        back_populates="product_type", sa_relationship_kwargs={"lazy": "selectin"}
     )
