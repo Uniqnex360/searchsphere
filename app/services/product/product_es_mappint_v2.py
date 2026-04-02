@@ -250,6 +250,7 @@ async def get_product_auto_complete_v4(
     es: Elasticsearch,
     query: str = None,
     brand: Optional[List[str]] = None,
+    product_type: Optional[List[str]] = None,
     category: Optional[List[str]] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
@@ -266,6 +267,8 @@ async def get_product_auto_complete_v4(
     filters = []
     if brand:
         filters.append({"terms": {"brand.keyword": brand}})
+    if product_type:
+        filters.append({"terms": {"product_type.keyword": product_type}})
     if category:
         filters.append({"terms": {"category.keyword": category}})
     if min_price is not None or max_price is not None:
@@ -292,6 +295,8 @@ async def get_product_auto_complete_v4(
                     {"term": {"product_name.keyword": query.lower()}},
                     # Brand match
                     {"match": {"brand": {"query": query}}},
+                    # Product type match
+                    {"match": {"product_type": {"query": query}}},
                     # Category match
                     {"match": {"category": {"query": query}}},
                     # SKU match
@@ -327,6 +332,17 @@ async def get_product_auto_complete_v4(
         }
     else:
         query_body = {"match_all": {}}
+
+    # Total number of documents in the index (ignoring filters)
+    total_docs_resp = es.count(index=index)
+    total_docs = total_docs_resp.get("count", 0)
+
+    # Total after applying search + filters
+    total_hits_resp = es.count(
+        index=index,
+        body={"query": {"bool": {"must": [query_body], "filter": filters}}},
+    )
+    total_hits = total_hits_resp.get("count", 0)
 
     # -----------------------------
     # Sorting (nulls last)
@@ -388,6 +404,26 @@ async def get_product_auto_complete_v4(
                     }
                 },
             },
+            "product_type": {
+                "filter": {
+                    "bool": {
+                        "must": [
+                            f
+                            for f in filters
+                            if not f.get("terms", {}).get("product_type.keyword")
+                        ]
+                    }
+                },
+                "aggs": {
+                    "values": {
+                        "terms": {
+                            "field": "product_type.keyword",
+                            "size": 1000,
+                            "order": {"_key": "asc"},
+                        }
+                    }
+                },
+            },
             "categories": {
                 "filter": {
                     "bool": {
@@ -421,6 +457,14 @@ async def get_product_auto_complete_v4(
         bucket["key"]
         for bucket in resp.get("aggregations", {})
         .get("brands", {})
+        .get("values", {})
+        .get("buckets", [])
+    ]
+
+    product_type_list = [
+        bucket["key"]
+        for bucket in resp.get("aggregations", {})
+        .get("product_type", {})
         .get("values", {})
         .get("buckets", [])
     ]
@@ -459,16 +503,20 @@ async def get_product_auto_complete_v4(
         for hit in hits
     ]
 
-    total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
+    # total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
 
     return {
         "total": total_hits,
         "total_docs_after_filter": total_hits,
+        "total_docs": total_docs,
         "page": page,
         "size": size,
         "total_pages": (total_hits + size - 1) // size,
         "results": results,
         "suggest": suggestions,
-        "facets": {"brands": brand_list, "categories": category_list},
+        "facets": {
+            "brands": brand_list,
+            "categories": category_list,
+            "product_type": product_type_list,
+        },
     }
-

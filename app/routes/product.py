@@ -3,20 +3,24 @@ from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func, desc
 from sqlalchemy.orm import selectinload
+from sqlalchemy import select, func, desc, asc, cast, String, case
+from sqlalchemy.sql.sqltypes import String
 
 from fastapi import APIRouter, Depends, Query, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 
-from app.models import Product, Category, ProductSearchResult
+from app.models import Product, Category, ProductSearchResult, Brand
 from app.services import (
     ESCollection,
+    ElasticsearchService,
     autocomplete_products,
     autocomplete_product_vector,
     autocomplete_with_es_qdrant,
     get_product_auto_complete_v3,
     get_product_auto_complete_v4,
     create_product_mapping,
+    sync_products_to_es,
 )
 from app.es_client import get_es
 from app.database import get_session
@@ -62,9 +66,14 @@ async def get_product_filter_meta(db: AsyncSession = Depends(get_session)):
     # -------------------
     # 1. Get unique brands in ascending order
     # -------------------
-    brand_stmt = select(Product.brand).distinct().order_by(Product.brand.asc())
-    brand_result = await db.execute(brand_stmt)
-    brands = [row[0] for row in brand_result.fetchall()]
+    brand_stmt = (
+        select(Brand.brand_name)
+        .join(Product, Product.brand_id == Brand.id)
+        .distinct()
+        .order_by(Brand.brand_name.asc())
+    )
+    brand_result = await db.exec(brand_stmt)
+    brands = [row[0] for row in brand_result.all()]
 
     # -------------------
     # 2. Get unique categories in ascending order
@@ -116,6 +125,7 @@ async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
             selectinload(Product.documents),
             selectinload(Product.category),
             selectinload(Product.industry),
+            selectinload(Product.brand),
         )
     )
     product = result.scalar_one_or_none()
@@ -140,6 +150,7 @@ async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
     product_data["industry"] = (
         jsonable_encoder(product.industry) if product.industry else None
     )
+    product_data["brand"] = jsonable_encoder(product.brand) if product.brand else None
 
     return {"success": True, "data": product_data}
 
@@ -308,6 +319,7 @@ async def autocomplate_product_vector(
     background_tasks: BackgroundTasks,
     q: str = "",
     brand_: Optional[List[str]] = Query(None, alias="brand[]"),
+    product_type_: Optional[List[str]] = Query(None, alias="product_type[]"),
     category_: Optional[List[str]] = Query(None, alias="category[]"),
     price_min: Optional[float] = Query(None),
     price_max: Optional[float] = Query(None),
@@ -321,6 +333,7 @@ async def autocomplate_product_vector(
 
     filters = {
         "brand": brand_,
+        "product_type": product_type_,
         "category": category_,
         "price_min": price_min,
         "price_max": price_max,
@@ -329,6 +342,7 @@ async def autocomplate_product_vector(
         es,
         q,
         brand=filters.get("brand"),
+        product_type=filters.get("product_type"),
         category=filters.get("category"),
         min_price=filters.get("price_min"),
         max_price=filters.get("price_max"),
@@ -368,9 +382,6 @@ def get_pagination_params(request: Request):
     return page, limit
 
 
-from app.services import sync_products_to_es, ElasticsearchService
-
-
 @router.get("/product/sync/es/")
 async def sync_product_with_elastic_serch(
     session: AsyncSession = Depends(get_session),
@@ -384,10 +395,6 @@ async def sync_product_with_elastic_serch(
     return {"success": True}
 
 
-from sqlalchemy import select, func, desc, asc, cast, String, nulls_last, case
-from sqlalchemy.sql.sqltypes import String
-
-
 @router.get("/product/search/keywords/")
 async def get_product_search_keywords_list(
     request: Request,
@@ -397,13 +404,12 @@ async def get_product_search_keywords_list(
     page, limit = get_pagination_params(request)
     offset = (page - 1) * limit
 
-    # Sorting params
+    # Sorting & search params
     sort_by = request.query_params.get("sort_by", "created_at")
     order = request.query_params.get("order", "desc").lower()
     search_q = request.query_params.get("search")
-    
 
-    # Keyword extraction
+    # Keyword extraction from JSON field
     keyword_col = cast(ProductSearchResult.query["q"], String)
 
     # Base aggregate
@@ -414,15 +420,27 @@ async def get_product_search_keywords_list(
         func.max(ProductSearchResult.created_at).label("created_at"),
         func.max(ProductSearchResult.url).label("url"),
     ).group_by(keyword_col, ProductSearchResult.total_result)
+
+    # Apply search filter
     if search_q:
         base_query = base_query.where(keyword_col.ilike(f"%{search_q}%"))
 
+    # Subquery for pagination and sorting
     subquery = base_query.subquery()
     cols = subquery.c
 
-    # Total count
-    total_result = await db.exec(select(func.count()).select_from(subquery))
-    total = total_result.one()[0]
+    # Total and unique count for this search
+    count_query = select(
+        func.count().label("total_count"),
+        func.count(func.distinct(keyword_col)).label("unique_count"),
+    ).select_from(ProductSearchResult)
+    if search_q:
+        count_query = count_query.where(keyword_col.ilike(f"%{search_q}%"))
+
+    count_result = await db.exec(count_query)
+    count_data = count_result.one()
+    total_count = count_data.total_count
+    unique_count = count_data.unique_count
 
     # Sorting logic
     sort_column_map = {
@@ -434,25 +452,20 @@ async def get_product_search_keywords_list(
     sort_column = sort_column_map.get(sort_by, cols.created_at)
 
     order_expressions = []
-
-    # If sorting by "q" (string)
     if sort_by == "q":
-        # Push empty strings last
         empty_last = case((cols.q == "", 1), else_=0)
-
         if order == "asc":
-            # First sort by empty_last marker, then by actual text
             order_expressions = [empty_last.asc(), cols.q.asc()]
         else:
-            # For descending just sort by text normally
             order_expressions = [empty_last.asc(), cols.q.desc()]
     else:
-        # Numeric or timestamp columns
-        if order == "asc":
-            order_expressions = [asc(sort_column).nulls_last()]
-        else:
-            order_expressions = [desc(sort_column).nulls_last()]
+        order_expressions = (
+            [asc(sort_column).nulls_last()]
+            if order == "asc"
+            else [desc(sort_column).nulls_last()]
+        )
 
+    # Final paginated query
     final_query = (
         select(
             cols.q,
@@ -485,7 +498,8 @@ async def get_product_search_keywords_list(
         "meta": {
             "page": page,
             "limit": limit,
-            "total": total,
-            "pages": (total + limit - 1) // limit,
+            "total": total_count,
+            "unique": unique_count,
+            "pages": (unique_count + limit - 1) // limit,
         },
     }
