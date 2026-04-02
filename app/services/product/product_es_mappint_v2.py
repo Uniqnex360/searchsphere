@@ -377,7 +377,7 @@ async def get_product_auto_complete_v4(
     body = {
         "from": (page - 1) * size,
         "size": size,
-        "_source": ["product_name", "brand", "category", "base_price", "images.url"],
+        "_source": ["product_name", "brand", "category", "base_price", "images.url", "product_type"],
         # "query": {"bool": {"must": [query_body], "filter": filters}},
         "query": {"bool": {"must": [query_body]}},
         "post_filter": {"bool": {"must": filters}},
@@ -492,6 +492,7 @@ async def get_product_auto_complete_v4(
             "score": hit["_score"],
             "name": hit["_source"].get("product_name"),
             "brand": hit["_source"].get("brand"),
+            "product_type": hit["_source"].get("product_type"),
             "category": hit["_source"].get("category"),
             "base_price": hit["_source"].get("base_price"),
             "images": [
