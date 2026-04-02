@@ -6,3 +6,4 @@ from .product_es_mappint_v2 import (
     create_product_mapping,
     get_product_auto_complete_v4,
 )
+from .es_product_v4 import sync_products_to_es

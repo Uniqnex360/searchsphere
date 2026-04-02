@@ -1,4 +1,5 @@
 from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
 
 
 class ElasticsearchService:
@@ -28,6 +29,12 @@ class ElasticsearchService:
     def search(self, query: dict):
         """Search documents"""
         return self.es.search(index=self.index, body=query)
+    
+    def bulk(self, actions):
+        for action in actions:
+            action["_index"] = self.index
+
+        bulk(self.es, actions)
 
 
 class ElasticsearchIndexManager:

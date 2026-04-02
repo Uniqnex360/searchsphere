@@ -30,6 +30,8 @@ async def sync_product_with_es_qdrant(
             selectinload(Product.documents),
             selectinload(Product.category),
             selectinload(Product.industry),
+            selectinload(Product.brand), # can be null
+            selectinload(Product.product_type), # can be null
         )
         .where(Product.id == product_id)
     )
