@@ -15,33 +15,33 @@ services:
     volumes:
       - es-data:/usr/share/elasticsearch/data
 
-  kibana:
-    image: docker.elastic.co/kibana/kibana:8.12.0
-    container_name: kibana
-    depends_on:
-      - elasticsearch
-    environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-    ports:
-      - "5601:5601"
-    networks:
-      - elk-net
-    volumes:
-      - kibana-data:/usr/share/kibana/data
-
-  # fastapi:
-  #   build: ./app
-  #   container_name: fastapi
-  #   ports:
-  #     - "8000:8000"
-  #   volumes:
-  #     - ./app:/app
-  #   env_file:
-  #     - ./.env
+  # kibana:
+  #   image: docker.elastic.co/kibana/kibana:8.12.0
+  #   container_name: kibana
   #   depends_on:
   #     - elasticsearch
+  #   environment:
+  #     - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+  #   ports:
+  #     - "5601:5601"
   #   networks:
   #     - elk-net
+  #   volumes:
+  #     - kibana-data:/usr/share/kibana/data
+
+  fastapi:
+    build: .
+    container_name: fastapi
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+    env_file:
+      - ./.env
+    depends_on:
+      - elasticsearch
+    networks:
+      - elk-net
 
 networks:
   elk-net:
@@ -49,4 +49,4 @@ networks:
 
 volumes:
   es-data:
-  kibana-data:
+  # kibana-data:
