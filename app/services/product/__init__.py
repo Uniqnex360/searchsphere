@@ -10,4 +10,5 @@ from .es_product_v4 import sync_products_to_es
 from .es_product_v5 import sync_products_to_es_v5
 from .es_product_v6 import (
     sync_product_suggest_data_es_v6,
+    get_product_list_v6,
 )
