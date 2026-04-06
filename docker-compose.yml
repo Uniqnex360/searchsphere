@@ -29,19 +29,19 @@ services:
   #   volumes:
   #     - kibana-data:/usr/share/kibana/data
 
-  # fastapi:
-  #   build: ./app
-  #   container_name: fastapi
-  #   ports:
-  #     - "8000:8000"
-  #   volumes:
-  #     - ./app:/app
-  #   env_file:
-  #     - ./.env
-  #   depends_on:
-  #     - elasticsearch
-  #   networks:
-  #     - elk-net
+  fastapi:
+    build: ./app
+    container_name: fastapi
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+    env_file:
+      - ./.env
+    depends_on:
+      - elasticsearch
+    networks:
+      - elk-net
 
 networks:
   elk-net:
