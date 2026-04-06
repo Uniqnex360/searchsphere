@@ -5,32 +5,21 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Set work directory
+# Set working directory
 WORKDIR /app
 
-# Install minimal system dependencies for Python packages
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        build-essential \
-        gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy only requirements first (Docker layer caching)
+# Copy only requirements first
 COPY requirements.txt .
 
-# Upgrade pip & install dependencies without cache
+# Upgrade pip & install dependencies
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy app code
 COPY . .
 
-# Create non-root user & switch
-RUN useradd -m appuser
-USER appuser
+# Expose FastAPI port
+EXPOSE 8000
 
-# Expose port
-EXPOSE 10000
-
-# Run FastAPI with Gunicorn + Uvicorn workers
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "4", "-b", "0.0.0.0:10000", "main:app"]
+# Run FastAPI
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
