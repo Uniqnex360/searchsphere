@@ -2,7 +2,7 @@ from typing import List, Dict, Any
 from elasticsearch import Elasticsearch
 
 from app.services import ElasticsearchService
-from app.helpers import get_embedding
+# from app.helpers import get_embedding
 from app.models import Product
 
 
@@ -14,15 +14,15 @@ async def sync_with_vector_product(
     """syncs product data with vector embeddings using background tasks"""
 
     try:
-        product_name_em = get_embedding(product.product_name)
-        product_description_em = get_embedding(product.long_description)
+        # product_name_em = get_embedding(product.product_name)
+        # product_description_em = get_embedding(product.long_description)
         res = service.upsert(
             product.id,
             data={
                 "product_name": product.product_name,
                 "long_description": product.long_description,
-                "product_name_vector": product_name_em,
-                "long_description_vector": product_description_em,
+                # "product_name_vector": product_name_em,
+                # "long_description_vector": product_description_em,
             },
         )
         print("ES response", res)

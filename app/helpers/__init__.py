@@ -1,1 +1,1 @@
-from .embedding import get_embedding
+# from .embedding import get_embedding
