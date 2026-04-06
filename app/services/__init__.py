@@ -19,4 +19,6 @@ from .product import (
     create_product_mapping,
     get_product_auto_complete_v4,
     sync_products_to_es,
+    sync_products_to_es_v5,
+    sync_product_suggest_data_es_v6,
 )
