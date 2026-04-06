@@ -30,7 +30,7 @@ services:
   #     - kibana-data:/usr/share/kibana/data
 
   fastapi:
-    build: ./app
+    build: .
     container_name: fastapi
     ports:
       - "8000:8000"
