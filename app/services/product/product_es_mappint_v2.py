@@ -521,3 +521,5 @@ async def get_product_auto_complete_v4(
             "product_type": product_type_list,
         },
     }
+
+

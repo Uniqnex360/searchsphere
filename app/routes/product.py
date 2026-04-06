@@ -22,6 +22,7 @@ from app.services import (
     create_product_mapping,
     sync_products_to_es,
     sync_product_suggest_data_es_v6,
+    get_product_list_v6,
 )
 from app.es_client import get_es
 from app.database import get_session
@@ -509,101 +510,6 @@ async def get_product_search_keywords_list(
     }
 
 
-@router.get("/product/v5/auto-complete/")
-def autocomplete(
-    q: str = Query(..., min_length=1), elasticsearch: Elasticsearch = Depends(get_es)
-):
-    es_service = ElasticsearchService(elasticsearch, ESCollection.PRODUCT_V5.value)
-
-    # 🔹 Search body: only multi_match on all_suggestions to improve relevance
-    body = {
-        "size": 10,
-        "query": {
-            "multi_match": {
-                "query": q,
-                "fields": ["all_suggestions"],
-                "type": "bool_prefix",  # improves prefix autocomplete
-                "operator": "or",
-            }
-        },
-        "aggs": {
-            "brand": {"terms": {"field": "brand.keyword", "size": 10}},
-            "category": {"terms": {"field": "category.keyword", "size": 10}},
-            "product_type": {"terms": {"field": "product_type.keyword", "size": 10}},
-            "attribute": {"terms": {"field": "attributes.value.keyword", "size": 10}},
-            "mpn": {"terms": {"field": "mpn.keyword", "size": 10}},
-        },
-    }
-
-    resp = es_service.search(query=body)
-    hits = resp["hits"]["hits"]
-
-    seen = set()
-    suggests = []
-
-    q_lower = q.lower()
-
-    for hit in hits:
-        all_sugs = hit["_source"].get("all_suggestions", [])
-        if not all_sugs:
-            continue
-
-        matched = []
-
-        # 1️⃣ startswith matches (highest priority)
-        for s in all_sugs:
-            if s and s.lower().startswith(q_lower):
-                matched.append(s)
-
-        # 2️⃣ contains matches
-        if not matched:
-            for s in all_sugs:
-                if s and q_lower in s.lower():
-                    matched.append(s)
-
-        # 3️⃣ fallback
-        if not matched:
-            matched = [s for s in all_sugs if s]
-
-        # 🚀 Take top 2 suggestions per product (NOT just 1)
-        for s in matched[:2]:
-            normalized = s.strip().title()
-            if normalized not in seen:
-                seen.add(normalized)
-                suggests.append(normalized)
-
-        # optional: stop early if enough suggestions
-        if len(suggests) >= 10:
-            break
-
-    # 🔹 Aggregations helper
-    def extract_agg(name):
-        return [b["key"] for b in resp["aggregations"][name]["buckets"]]
-
-    result = {
-        "suggests": suggests,
-        "brand": extract_agg("brand"),
-        "category": extract_agg("category"),
-        "product_type": extract_agg("product_type"),
-        "attribute": extract_agg("attribute"),
-        "mpn": extract_agg("mpn"),
-        "meta": {"total": resp["hits"]["total"]["value"]},
-        "data": [
-            {
-                "id": hit["_id"],
-                "product_name": hit["_source"].get("product_name"),
-                "brand": hit["_source"].get("brand"),
-                "category": hit["_source"].get("category"),
-                "product_type": hit["_source"].get("product_type"),
-                "sale_price": hit["_source"].get("sale_price"),
-            }
-            for hit in hits
-        ],
-    }
-
-    return result
-
-
 @router.post("/product/v6/mapping/")
 async def update_product_data_v6(
     es: Elasticsearch = Depends(get_es), session: AsyncSession = Depends(get_session)
@@ -612,35 +518,97 @@ async def update_product_data_v6(
     return {}
 
 
+@router.get("/product/v6/list/")
+async def product_list_v6(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    q: str = "",
+    brand_: Optional[List[str]] = Query(None, alias="brand[]"),
+    product_type_: Optional[List[str]] = Query(None, alias="product_type[]"),
+    category_: Optional[List[str]] = Query(None, alias="category[]"),
+    price_min: Optional[float] = Query(None),
+    price_max: Optional[float] = Query(None),
+    es: Elasticsearch = Depends(get_es),
+    session: AsyncSession = Depends(get_session),
+    sort_by: str | None = None,
+    sort_order: str = "desc",
+    page: int = 1,
+):
+
+    filters = {
+        "brand": brand_,
+        "product_type": product_type_,
+        "category": category_,
+        "price_min": price_min,
+        "price_max": price_max,
+    }
+    data = await get_product_list_v6(
+        es,
+        q,
+        brand=filters.get("brand"),
+        product_type=filters.get("product_type"),
+        category=filters.get("category"),
+        min_price=filters.get("price_min"),
+        max_price=filters.get("price_max"),
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+    )
+
+    query_payload = {
+        "q": q,
+        "processed_query": data.get("processed_query"),
+        "filters": filters,
+        "page": page,
+    }
+
+    background_tasks.add_task(
+        save_search_result,
+        es,
+        session,
+        query_payload,
+        data,
+        request.headers.get("X-FE-URL", str(request.url)),
+    )
+    return {"total": len(data), "data": data}
+
+
 @router.get("/product/v6/auto-complete/")
 async def get_product_auto_complete_v6(
     q: str = Query(..., min_length=1),
     size: int = 10,
     es: Elasticsearch = Depends(get_es),
 ):
-    """
-    Auto-complete endpoint for products (brand + brand_category).
-    Rules:
-    1. Short query or exact brand → return all items from that document.
-    2. Specific query → return only matching string (brand or category).
-    3. No duplicates, respect `size` limit.
-    """
-
     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V6.value
     q_clean = q.strip().lower()
 
     if not q_clean:
         return {"success": True, "query": q, "count": 0, "results": []}
 
-    # Elasticsearch query: match brand_name or brand_category
+    # Elasticsearch query: match brand_name, brand_category, brand_category_product_type
     es_query = {
         "size": 100,  # fetch extra to handle duplicates
-        "_source": ["brand_name", "brand_category"],
+        "_source": [
+            "brand_name",
+            "brand_category",
+            "brand_category_product_type",
+            "brand_category_product_type_attribute",
+        ],
         "query": {
             "bool": {
                 "should": [
                     {"match_phrase_prefix": {"brand_name": {"query": q}}},
                     {"match_phrase_prefix": {"brand_category": {"query": q}}},
+                    {
+                        "match_phrase_prefix": {
+                            "brand_category_product_type": {"query": q}
+                        }
+                    },
+                    {
+                        "match_phrase_prefix": {
+                            "brand_category_product_type_attribute": {"query": q}
+                        }
+                    },
                 ]
             }
         },
@@ -663,38 +631,31 @@ async def get_product_auto_complete_v6(
 
     for hit in hits:
         source = hit.get("_source", {})
+        all_strings = []
+
+        # Add brand name
         brand_name = source.get("brand_name", "").strip()
-        brand_categories = source.get("brand_category", [])
+        if brand_name:
+            all_strings.append(brand_name)
 
-        brand_lower = brand_name.lower() if brand_name else ""
+        # Add brand_category + brand_category_product_type
+        for field in [
+            "brand_category",
+            "brand_category_product_type",
+            "brand_category_product_type_attribute",
+        ]:
+            for entry in source.get(field, []):
+                if entry:
+                    all_strings.append(entry.strip())
 
-        # Generic query: short query OR prefix of brand
-        generic_query = len(q_clean) <= 2 or brand_lower.startswith(q_clean)
-
-        if generic_query:
-            # Show brand + all categories
-            if brand_name and brand_name not in seen:
-                suggestions.append({"text": brand_name})
-                seen.add(brand_name)
-            for bc in brand_categories:
-                bc_clean = bc.strip()
-                if bc_clean and bc_clean not in seen:
-                    suggestions.append({"text": bc_clean})
-                    seen.add(bc_clean)
-        else:
-            # Specific query: show only matching string
-            if q_clean in brand_lower and brand_name not in seen:
-                suggestions.append({"text": brand_name})
-                seen.add(brand_name)
-
-            # Add only the first matching category
-            for bc in brand_categories:
-                bc_clean = bc.strip()
-                if q_clean in bc_clean.lower() and bc_clean not in seen:
-                    suggestions.append({"text": bc_clean})
-                    seen.add(bc_clean)
-                    break
-
+        # Filter by query anywhere in the string
+        for s in all_strings:
+            s_lower = s.lower()
+            if q_clean in s_lower and s not in seen:
+                suggestions.append({"text": s})
+                seen.add(s)
+            if len(suggestions) >= size:
+                break
         if len(suggestions) >= size:
             break
 
