@@ -7,7 +7,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
 from app.services import ElasticsearchService, QDrantCollection
-from app.helpers import get_embedding
+# from app.helpers import get_embedding
 from app.models import Product
 
 
@@ -109,15 +109,15 @@ async def sync_product_with_es_qdrant(
 
     # print("text count", len(qdrant_text.split())) by the above text size is 200 t0 300 words
 
-    vector = get_embedding(qdrant_text)
+    # vector = get_embedding(qdrant_text)
 
-    point = PointStruct(
-        id=product_id,
-        vector=vector,
-        payload=data,
-    )
+    # point = PointStruct(
+    #     id=product_id,
+    #     vector=vector,
+    #     payload=data,
+    # )
 
-    qdrant_client.upsert(collection_name=QDrantCollection.PRODUCT.value, points=[point])
+    # qdrant_client.upsert(collection_name=QDrantCollection.PRODUCT.value, points=[point])
 
     return None
 
@@ -219,7 +219,7 @@ def vector_search(qdrant, query: str, limit: int = 20, filters: dict = None):
     if not query or not query.strip():
         return []  # ✅ skip vector search
 
-    vector = get_embedding(query)
+    # vector = get_embedding(query)
     from qdrant_client.models import Filter, FieldCondition, MatchValue
 
     qdrant_filter = None
@@ -247,14 +247,15 @@ def vector_search(qdrant, query: str, limit: int = 20, filters: dict = None):
         if must_conditions:
             qdrant_filter = Filter(must=must_conditions)
 
-    response = qdrant.query_points(
-        collection_name=QDrantCollection.PRODUCT.value,
-        query=vector,
-        query_filter=qdrant_filter,
-        limit=20,
-        with_payload=True,
-    )
-    return response.points
+    # response = qdrant.query_points(
+    #     collection_name=QDrantCollection.PRODUCT.value,
+    #     query=vector,
+    #     query_filter=qdrant_filter,
+    #     limit=20,
+    #     with_payload=True,
+    # )
+    return None
+    # return response.points
 
 
 from typing import List, Dict, Any, Optional

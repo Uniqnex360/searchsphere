@@ -2,7 +2,7 @@ import re
 from typing import Any, Dict, Optional, List, Tuple
 from elasticsearch import Elasticsearch
 
-from app.helpers import get_embedding
+# from app.helpers import get_embedding
 from app.services import QDrantCollection
 
 UNITS = ["mm", "cm", "inch", "in", "kg", "g"]
@@ -312,7 +312,7 @@ def vector_search(qdrant, query: str, limit: int = 20, filters: dict = None):
     if not query or not query.strip():
         return []
 
-    vector = get_embedding(query)
+    # vector = get_embedding(query)
     from qdrant_client.models import Filter, FieldCondition, MatchValue
 
     qdrant_filter = None
@@ -339,14 +339,15 @@ def vector_search(qdrant, query: str, limit: int = 20, filters: dict = None):
         if must_conditions:
             qdrant_filter = Filter(must=must_conditions)
 
-    response = qdrant.query_points(
-        collection_name=QDrantCollection.PRODUCT.value,
-        query=vector,
-        query_filter=qdrant_filter,
-        limit=limit,
-        with_payload=True,
-    )
-    return response.points
+    # response = qdrant.query_points(
+    #     collection_name=QDrantCollection.PRODUCT.value,
+    #     query=vector,
+    #     query_filter=qdrant_filter,
+    #     limit=limit,
+    #     with_payload=True,
+    # )
+    return None
+    # return response.points
 
 
 # -----------------------------
