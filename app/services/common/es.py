@@ -29,12 +29,32 @@ class ElasticsearchService:
     def search(self, query: dict):
         """Search documents"""
         return self.es.search(index=self.index, body=query)
-    
-    def bulk(self, actions):
+
+    from elasticsearch.helpers import bulk
+
+
+class ElasticsearchService:
+    def __init__(self, es: Elasticsearch, index: str):
+        self.es = es
+        self.index = index
+
+    def bulk(self, actions, raise_on_error=False):
+        """
+        Bulk insert/update with error visibility
+        """
         for action in actions:
             action["_index"] = self.index
 
-        bulk(self.es, actions)
+        success, errors = bulk(
+            self.es, actions, raise_on_error=raise_on_error, stats_only=False
+        )
+
+        if errors:
+            print("❌ Bulk Errors:")
+            for err in errors[:5]:  # limit output
+                print(err)
+
+        return success, errors
 
 
 class ElasticsearchIndexManager:

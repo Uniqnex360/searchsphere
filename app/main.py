@@ -10,40 +10,40 @@ from app.routes import routers
 from app.services import get_qdrant_client, QDrantCollection
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    qdrant_client = get_qdrant_client()
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     qdrant_client = get_qdrant_client()
 
-    collections = qdrant_client.get_collections().collections
-    exists = any(c.name == QDrantCollection.PRODUCT.value for c in collections)
+#     collections = qdrant_client.get_collections().collections
+#     exists = any(c.name == QDrantCollection.PRODUCT.value for c in collections)
 
-    # Create the collection if missing
-    if not exists:
-        qdrant_client.create_collection(
-            collection_name=QDrantCollection.PRODUCT.value,
-            vectors_config=models.VectorParams(
-                size=384,
-                distance=models.Distance.COSINE,
-            ),
-        )
+#     # Create the collection if missing
+#     if not exists:
+#         qdrant_client.create_collection(
+#             collection_name=QDrantCollection.PRODUCT.value,
+#             vectors_config=models.VectorParams(
+#                 size=384,
+#                 distance=models.Distance.COSINE,
+#             ),
+#         )
 
-    # Get payload schema to see existing indexed fields
-    info = qdrant_client.get_collection(QDrantCollection.PRODUCT.value)
-    existing_payload_schema = info.payload_schema or {}
+#     # Get payload schema to see existing indexed fields
+#     info = qdrant_client.get_collection(QDrantCollection.PRODUCT.value)
+#     existing_payload_schema = info.payload_schema or {}
 
-    # List of fields to index
-    index_fields = ["brand", "category_name"]
+#     # List of fields to index
+#     index_fields = ["brand", "category_name"]
 
-    for field in index_fields:
-        if field not in existing_payload_schema:
-            print(f"Creating payload index for field: {field}")
-            qdrant_client.create_payload_index(
-                collection_name=QDrantCollection.PRODUCT.value,
-                field_name=field,
-                field_schema="keyword",  # simple string type
-            )
+#     for field in index_fields:
+#         if field not in existing_payload_schema:
+#             print(f"Creating payload index for field: {field}")
+#             qdrant_client.create_payload_index(
+#                 collection_name=QDrantCollection.PRODUCT.value,
+#                 field_name=field,
+#                 field_schema="keyword",  # simple string type
+#             )
 
-    yield
+#     yield
 
 
 app = FastAPI(title="Search Sphere")

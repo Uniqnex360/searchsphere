@@ -7,3 +7,7 @@ from .product_es_mappint_v2 import (
     get_product_auto_complete_v4,
 )
 from .es_product_v4 import sync_products_to_es
+from .es_product_v5 import sync_products_to_es_v5
+from .es_product_v6 import (
+    sync_product_suggest_data_es_v6,
+)
