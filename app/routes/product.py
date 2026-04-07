@@ -684,9 +684,12 @@ async def get_product_auto_complete_v6(
     if not q_clean:
         return {"success": True, "query": q, "count": 0, "results": []}
 
+    # 🔥 split query words (for multi-word ranking)
+    q_words = q_clean.split()
+
     # Elasticsearch query (prefix + fuzzy)
     es_query = {
-        "size": 200,  # 🔥 increased for fuzzy results
+        "size": 200,
         "_source": [
             "brand_name",
             "brand_category",
@@ -696,7 +699,7 @@ async def get_product_auto_complete_v6(
         "query": {
             "bool": {
                 "should": [
-                    # ✅ Existing prefix queries
+                    # ✅ prefix queries
                     {"match_phrase_prefix": {"brand_name": {"query": q}}},
                     {"match_phrase_prefix": {"brand_category": {"query": q}}},
                     {
@@ -709,13 +712,13 @@ async def get_product_auto_complete_v6(
                             "brand_category_product_type_attribute": {"query": q}
                         }
                     },
-                    # ✅ NEW: fuzzy fallback (typo handling)
+                    # ✅ fuzzy fallback (improved)
                     {
                         "match": {
                             "brand_name": {
                                 "query": q,
                                 "fuzziness": "AUTO",
-                                "prefix_length": 0,
+                                "operator": "and",  # 🔥 important
                                 "boost": 0.6,
                             }
                         }
@@ -725,7 +728,7 @@ async def get_product_auto_complete_v6(
                             "brand_category": {
                                 "query": q,
                                 "fuzziness": "AUTO",
-                                "prefix_length": 0,
+                                "operator": "and",  # 🔥 important
                                 "boost": 0.4,
                             }
                         }
@@ -753,15 +756,15 @@ async def get_product_auto_complete_v6(
 
     for hit in hits:
         source = hit.get("_source", {})
-        score = hit.get("_score", 0)  # 🔥 used for fuzzy filtering
+        score = hit.get("_score", 0)
         all_strings = []
 
-        # Add brand name
+        # brand name
         brand_name = source.get("brand_name", "").strip()
         if brand_name:
             all_strings.append(brand_name)
 
-        # Add other fields
+        # other fields
         for field in [
             "brand_category",
             "brand_category_product_type",
@@ -771,25 +774,53 @@ async def get_product_auto_complete_v6(
                 if entry:
                     all_strings.append(entry.strip())
 
-        # Filter logic (updated for fuzziness)
+        # 🔥 filtering + ranking logic
         for s in all_strings:
             s_lower = s.lower()
 
+            # ❌ remove exact duplicate (e.g., "3M")
+            if s_lower == q_clean:
+                continue
+
+            # 🔥 count matching words
+            word_match_count = sum(1 for w in q_words if w in s_lower)
+
             if (
-                q_clean in s_lower or score > 1
-            ) and s not in seen:  # ✅ allow fuzzy matches
-                suggestions.append({"text": s})
+                word_match_count > 0  # at least one word matches
+                or score > 1  # fuzzy fallback
+            ) and s not in seen:
+
+                suggestions.append(
+                    {
+                        "text": s,
+                        "score": score,
+                        "word_match": word_match_count,
+                    }
+                )
                 seen.add(s)
 
-            if len(suggestions) >= size:
+            if len(suggestions) >= size * 3:  # buffer for sorting
                 break
 
-        if len(suggestions) >= size:
+        if len(suggestions) >= size * 3:
             break
+
+    # 🔥 smart sorting (VERY IMPORTANT)
+    suggestions = sorted(
+        suggestions,
+        key=lambda x: (
+            -x["word_match"],  # more words matched → higher
+            -x["score"],  # ES relevance
+            x["text"],
+        ),
+    )
+
+    # 🔥 final response
+    results = [{"text": s["text"]} for s in suggestions[:size]]
 
     return {
         "success": True,
         "query": q,
-        "count": len(suggestions),
-        "results": suggestions[:size],
+        "count": len(results),
+        "results": results,
     }
