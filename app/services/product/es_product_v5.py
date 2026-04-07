@@ -281,7 +281,6 @@ async def sync_products_to_es_v5(
             f"📊 Batch Result: Processed={batch_processed}, "
             f"Created={batch_created}, Updated={batch_updated}, Errors={batch_errors}"
         )
-        break
 
         total_indexed += len(products)
         offset += batch_size
