@@ -415,16 +415,21 @@ async def get_product_search_keywords_list(
     search_q = request.query_params.get("search")
 
     # Keyword extraction from JSON field
-    keyword_col = cast(ProductSearchResult.query["q"], String)
+    # keyword_col = cast(ProductSearchResult.query["q"], String)
+    keyword_col = func.lower(cast(ProductSearchResult.query["q"], String))
 
     # Base aggregate
-    base_query = select(
-        keyword_col.label("q"),
-        ProductSearchResult.total_result,
-        func.count().label("search_count"),
-        func.max(ProductSearchResult.created_at).label("created_at"),
-        func.max(ProductSearchResult.url).label("url"),
-    ).group_by(keyword_col, ProductSearchResult.total_result)
+    base_query = (
+        select(
+            keyword_col.label("q"),
+            ProductSearchResult.total_result,
+            func.count().label("search_count"),
+            func.max(ProductSearchResult.created_at).label("created_at"),
+            func.max(ProductSearchResult.url).label("url"),
+        )
+        .where(ProductSearchResult.is_active == True)
+        .group_by(keyword_col, ProductSearchResult.total_result)
+    )
 
     # Apply search filter
     if search_q:
