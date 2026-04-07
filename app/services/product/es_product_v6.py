@@ -328,6 +328,247 @@ async def sync_product_suggest_data_es_v6(
     return {"total_processed": total_processed}
 
 
+# async def get_product_list_v6(
+#     es: Elasticsearch,
+#     query: str = None,
+#     brand: Optional[List[str]] = None,
+#     product_type: Optional[List[str]] = None,
+#     category: Optional[List[str]] = None,
+#     min_price: Optional[float] = None,
+#     max_price: Optional[float] = None,
+#     sort_by: str = "relevance",  # relevance | product_name | base_price
+#     sort_order: str = "desc",
+#     page: int = 1,
+#     size: int = 50,
+#     index: str = ESCollection.PRODUCT_V7.value,
+# ) -> Dict[str, Any]:
+
+#     # -----------------------------
+#     # Build filters
+#     # -----------------------------
+#     filters = []
+#     if brand:
+#         filters.append({"terms": {"brand.keyword": brand}})
+#     if product_type:
+#         filters.append({"terms": {"product_type.keyword": product_type}})
+#     if category:
+#         filters.append({"terms": {"category.keyword": category}})
+#     if min_price is not None or max_price is not None:
+#         price_range = {}
+#         if min_price is not None:
+#             price_range["gte"] = min_price
+#         if max_price is not None:
+#             price_range["lte"] = max_price
+#         filters.append({"range": {"base_price": price_range}})
+
+#     # -----------------------------
+#     # Build query
+#     # -----------------------------
+#     if query:
+#         query_body = {
+#             "bool": {
+#                 "should": [
+#                     {"term": {"suggest.keyword": query}},  # exact match
+#                     {"match_phrase_prefix": {"suggest": query}},  # prefix match
+#                 ],
+#                 "minimum_should_match": 1,
+#             }
+#         }
+#     else:
+#         query_body = {"match_all": {}}
+
+#     # Total documents in the index (without filters)
+#     total_docs_resp = es.count(index=index)
+#     total_docs = total_docs_resp.get("count", 0)
+
+#     # Total after applying query + filters
+#     total_hits_resp = es.count(
+#         index=index,
+#         body={"query": {"bool": {"must": [query_body], "filter": filters}}},
+#     )
+#     total_hits = total_hits_resp.get("count", 0)
+
+#     # -----------------------------
+#     # Sorting
+#     # -----------------------------
+#     es_sort = []
+#     if sort_by == "product_name":
+#         es_sort.append(
+#             {"product_name.keyword": {"order": sort_order, "missing": "_last"}}
+#         )
+#     elif sort_by == "base_price":
+#         es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
+#     else:
+#         es_sort.append({"_score": {"order": sort_order}})
+
+#     # -----------------------------
+#     # Final search body
+#     # -----------------------------
+#     body = {
+#         "from": (page - 1) * size,
+#         "size": size,
+#         "_source": [
+#             "product_name",
+#             "brand",
+#             "category",
+#             "base_price",
+#             "images.url",
+#             "product_type",
+#             "suggest",
+#         ],
+#         "query": {"bool": {"must": [query_body]}},
+#         "post_filter": {"bool": {"must": filters}},
+#         "sort": es_sort,
+#         "aggs": {
+#             "brands": {
+#                 "filter": {
+#                     "bool": {
+#                         "must": [
+#                             f
+#                             for f in filters
+#                             if not f.get("terms", {}).get("brand.keyword")
+#                         ]
+#                     }
+#                 },
+#                 "aggs": {
+#                     "values": {
+#                         "terms": {
+#                             "field": "brand.keyword",
+#                             "size": 1000,
+#                             "order": {"_key": "asc"},
+#                         }
+#                     }
+#                 },
+#             },
+#             "product_type": {
+#                 "filter": {
+#                     "bool": {
+#                         "must": [
+#                             f
+#                             for f in filters
+#                             if not f.get("terms", {}).get("product_type.keyword")
+#                         ]
+#                     }
+#                 },
+#                 "aggs": {
+#                     "values": {
+#                         "terms": {
+#                             "field": "product_type.keyword",
+#                             "size": 1000,
+#                             "order": {"_key": "asc"},
+#                         }
+#                     }
+#                 },
+#             },
+#             "categories": {
+#                 "filter": {
+#                     "bool": {
+#                         "must": [
+#                             f
+#                             for f in filters
+#                             if not f.get("terms", {}).get("category.keyword")
+#                         ]
+#                     }
+#                 },
+#                 "aggs": {
+#                     "values": {
+#                         "terms": {
+#                             "field": "category.keyword",
+#                             "size": 1000,
+#                             "order": {"_key": "asc"},
+#                         }
+#                     }
+#                 },
+#             },
+#         },
+#     }
+
+#     # -----------------------------
+#     # Execute search
+#     # -----------------------------
+#     resp = es.search(index=index, body=body)
+#     hits = resp.get("hits", {}).get("hits", [])
+
+#     # -----------------------------
+#     # Extract facets
+#     # -----------------------------
+#     brand_list = [
+#         bucket["key"]
+#         for bucket in resp.get("aggregations", {})
+#         .get("brands", {})
+#         .get("values", {})
+#         .get("buckets", [])
+#     ]
+#     product_type_list = [
+#         bucket["key"]
+#         for bucket in resp.get("aggregations", {})
+#         .get("product_type", {})
+#         .get("values", {})
+#         .get("buckets", [])
+#     ]
+#     category_list = [
+#         bucket["key"]
+#         for bucket in resp.get("aggregations", {})
+#         .get("categories", {})
+#         .get("values", {})
+#         .get("buckets", [])
+#     ]
+
+#     # -----------------------------
+#     # Format results with attributes included in suggest
+#     # -----------------------------
+#     results = []
+#     for hit in hits:
+#         source = hit["_source"]
+#         suggest_set = set(source.get("suggest", []))
+
+#         # Add brand + category + product_type + attributes
+#         attributes = source.get("attributes", [])
+#         brand_name = source.get("brand", "")
+#         category_name = source.get("category", "")
+#         product_type_name = source.get("product_type", "")
+
+#         for attr in attributes:
+#             attr_name = attr.get("name")
+#             attr_value = attr.get("value")
+#             if attr_name and attr_value:
+#                 attr_entry = f"{brand_name} {category_name} {product_type_name} {attr_name} {attr_value}"
+#                 suggest_set.add(attr_entry)
+
+#         results.append(
+#             {
+#                 "id": hit["_id"],
+#                 "score": hit["_score"],
+#                 "name": source.get("product_name"),
+#                 "brand": brand_name,
+#                 "product_type": product_type_name,
+#                 "category": category_name,
+#                 "base_price": source.get("base_price"),
+#                 "images": [
+#                     i.get("url")
+#                     for i in source.get("images", [])
+#                     if isinstance(i, dict)
+#                 ],
+#                 "suggest": list(suggest_set),  # updated suggestions
+#             }
+#         )
+
+#     return {
+#         "total": total_hits,
+#         "total_docs_after_filter": total_hits,
+#         "total_docs": total_docs,
+#         "page": page,
+#         "size": size,
+#         "total_pages": (total_hits + size - 1) // size,
+#         "results": results,
+#         "facets": {
+#             "brands": brand_list,
+#             "categories": category_list,
+#             "product_type": product_type_list,
+#         },
+#     }
+
+
 async def get_product_list_v6(
     es: Elasticsearch,
     query: str = None,
@@ -340,7 +581,7 @@ async def get_product_list_v6(
     sort_order: str = "desc",
     page: int = 1,
     size: int = 50,
-    index: str = ESCollection.PRODUCT_V6.value,
+    index: str = ESCollection.PRODUCT_V7.value,
 ) -> Dict[str, Any]:
 
     # -----------------------------
@@ -361,6 +602,8 @@ async def get_product_list_v6(
             price_range["lte"] = max_price
         filters.append({"range": {"base_price": price_range}})
 
+    print("🔹 Filters applied:", filters)
+
     # -----------------------------
     # Build query
     # -----------------------------
@@ -377,16 +620,24 @@ async def get_product_list_v6(
     else:
         query_body = {"match_all": {}}
 
+    print("🔹 Query body:", query_body)
+
+    # -----------------------------
     # Total documents in the index (without filters)
+    # -----------------------------
     total_docs_resp = es.count(index=index)
     total_docs = total_docs_resp.get("count", 0)
+    print(f"🔹 Total documents in index: {total_docs}")
 
+    # -----------------------------
     # Total after applying query + filters
+    # -----------------------------
     total_hits_resp = es.count(
         index=index,
         body={"query": {"bool": {"must": [query_body], "filter": filters}}},
     )
     total_hits = total_hits_resp.get("count", 0)
+    print(f"🔹 Total documents matching query + filters: {total_hits}")
 
     # -----------------------------
     # Sorting
@@ -483,11 +734,15 @@ async def get_product_list_v6(
         },
     }
 
+    print("🔹 Final search body prepared")
+
     # -----------------------------
     # Execute search
     # -----------------------------
     resp = es.search(index=index, body=body)
     hits = resp.get("hits", {}).get("hits", [])
+
+    print(f"🔹 Number of hits returned in this page: {len(hits)}")
 
     # -----------------------------
     # Extract facets
@@ -522,7 +777,6 @@ async def get_product_list_v6(
         source = hit["_source"]
         suggest_set = set(source.get("suggest", []))
 
-        # Add brand + category + product_type + attributes
         attributes = source.get("attributes", [])
         brand_name = source.get("brand", "")
         category_name = source.get("category", "")
@@ -549,9 +803,11 @@ async def get_product_list_v6(
                     for i in source.get("images", [])
                     if isinstance(i, dict)
                 ],
-                "suggest": list(suggest_set),  # updated suggestions
+                "suggest": list(suggest_set),
             }
         )
+
+    print(f"🔹 Returning {len(results)} results for page {page}")
 
     return {
         "total": total_hits,

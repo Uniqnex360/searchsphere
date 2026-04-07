@@ -393,7 +393,7 @@ async def sync_product_with_elastic_serch(
     es: Elasticsearch = Depends(get_es),
 ):
 
-    es_service = ElasticsearchService(es, ESCollection.PRODUCT_V5.value)
+    es_service = ElasticsearchService(es, ESCollection.PRODUCT_V7.value)
 
     await sync_products_to_es_v5(session=session, es_service=es_service, batch_size=30)
 
