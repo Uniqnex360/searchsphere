@@ -573,6 +573,100 @@ async def product_list_v6(
     return {"total": len(data), "data": data}
 
 
+# @router.get("/product/v6/auto-complete/")
+# async def get_product_auto_complete_v6(
+#     q: str = Query(..., min_length=1),
+#     size: int = 10,
+#     es: Elasticsearch = Depends(get_es),
+# ):
+#     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V6.value
+#     q_clean = q.strip().lower()
+
+#     if not q_clean:
+#         return {"success": True, "query": q, "count": 0, "results": []}
+
+#     # Elasticsearch query: match brand_name, brand_category, brand_category_product_type
+#     es_query = {
+#         "size": 100,  # fetch extra to handle duplicates
+#         "_source": [
+#             "brand_name",
+#             "brand_category",
+#             "brand_category_product_type",
+#             "brand_category_product_type_attribute",
+#         ],
+#         "query": {
+#             "bool": {
+#                 "should": [
+#                     {"match_phrase_prefix": {"brand_name": {"query": q}}},
+#                     {"match_phrase_prefix": {"brand_category": {"query": q}}},
+#                     {
+#                         "match_phrase_prefix": {
+#                             "brand_category_product_type": {"query": q}
+#                         }
+#                     },
+#                     {
+#                         "match_phrase_prefix": {
+#                             "brand_category_product_type_attribute": {"query": q}
+#                         }
+#                     },
+#                 ]
+#             }
+#         },
+#     }
+
+#     try:
+#         response = es.search(index=index_name, body=es_query)
+#     except Exception as e:
+#         return {
+#             "success": False,
+#             "error": str(e),
+#             "query": q,
+#             "count": 0,
+#             "results": [],
+#         }
+
+#     hits = response.get("hits", {}).get("hits", [])
+#     suggestions = []
+#     seen = set()
+
+#     for hit in hits:
+#         source = hit.get("_source", {})
+#         all_strings = []
+
+#         # Add brand name
+#         brand_name = source.get("brand_name", "").strip()
+#         if brand_name:
+#             all_strings.append(brand_name)
+
+#         # Add brand_category + brand_category_product_type
+#         for field in [
+#             "brand_category",
+#             "brand_category_product_type",
+#             "brand_category_product_type_attribute",
+#         ]:
+#             for entry in source.get(field, []):
+#                 if entry:
+#                     all_strings.append(entry.strip())
+
+#         # Filter by query anywhere in the string
+#         for s in all_strings:
+#             s_lower = s.lower()
+#             if q_clean in s_lower and s not in seen:
+#                 suggestions.append({"text": s})
+#                 seen.add(s)
+#             if len(suggestions) >= size:
+#                 break
+#         if len(suggestions) >= size:
+#             break
+
+#     return {
+#         "success": True,
+#         "query": q,
+#         "count": len(suggestions),
+#         "results": suggestions[:size],
+#     }
+
+
 @router.get("/product/v6/auto-complete/")
 async def get_product_auto_complete_v6(
     q: str = Query(..., min_length=1),
@@ -585,9 +679,9 @@ async def get_product_auto_complete_v6(
     if not q_clean:
         return {"success": True, "query": q, "count": 0, "results": []}
 
-    # Elasticsearch query: match brand_name, brand_category, brand_category_product_type
+    # Elasticsearch query (prefix + fuzzy)
     es_query = {
-        "size": 100,  # fetch extra to handle duplicates
+        "size": 200,  # 🔥 increased for fuzzy results
         "_source": [
             "brand_name",
             "brand_category",
@@ -597,6 +691,7 @@ async def get_product_auto_complete_v6(
         "query": {
             "bool": {
                 "should": [
+                    # ✅ Existing prefix queries
                     {"match_phrase_prefix": {"brand_name": {"query": q}}},
                     {"match_phrase_prefix": {"brand_category": {"query": q}}},
                     {
@@ -609,7 +704,29 @@ async def get_product_auto_complete_v6(
                             "brand_category_product_type_attribute": {"query": q}
                         }
                     },
-                ]
+                    # ✅ NEW: fuzzy fallback (typo handling)
+                    {
+                        "match": {
+                            "brand_name": {
+                                "query": q,
+                                "fuzziness": "AUTO",
+                                "prefix_length": 0,
+                                "boost": 0.6,
+                            }
+                        }
+                    },
+                    {
+                        "match": {
+                            "brand_category": {
+                                "query": q,
+                                "fuzziness": "AUTO",
+                                "prefix_length": 0,
+                                "boost": 0.4,
+                            }
+                        }
+                    },
+                ],
+                "minimum_should_match": 1,
             }
         },
     }
@@ -631,6 +748,7 @@ async def get_product_auto_complete_v6(
 
     for hit in hits:
         source = hit.get("_source", {})
+        score = hit.get("_score", 0)  # 🔥 used for fuzzy filtering
         all_strings = []
 
         # Add brand name
@@ -638,7 +756,7 @@ async def get_product_auto_complete_v6(
         if brand_name:
             all_strings.append(brand_name)
 
-        # Add brand_category + brand_category_product_type
+        # Add other fields
         for field in [
             "brand_category",
             "brand_category_product_type",
@@ -648,14 +766,19 @@ async def get_product_auto_complete_v6(
                 if entry:
                     all_strings.append(entry.strip())
 
-        # Filter by query anywhere in the string
+        # Filter logic (updated for fuzziness)
         for s in all_strings:
             s_lower = s.lower()
-            if q_clean in s_lower and s not in seen:
+
+            if (
+                q_clean in s_lower or score > 1
+            ) and s not in seen:  # ✅ allow fuzzy matches
                 suggestions.append({"text": s})
                 seen.add(s)
+
             if len(suggestions) >= size:
                 break
+
         if len(suggestions) >= size:
             break
 

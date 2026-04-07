@@ -28,25 +28,43 @@ async def create_or_get_index_v6(es: Elasticsearch, index_name: str, index_type:
     }
 
     # Dynamic mapping based on type
-    if index_type == ESCollection.PRODUCT_AUTO_SUGGEST_V6.value:
+    if index_type == ESCollection.PRODUCT_AUTO_SUGGEST_V7.value:
         mappings = {
             "properties": {
                 "brand_name": {
-                    "type": "search_as_you_type",
+                    "type": "text",
                     "analyzer": "lowercase_analyzer",
+                    "fields": {
+                        "autocomplete": {
+                            "type": "search_as_you_type",
+                            "analyzer": "lowercase_analyzer",
+                        }
+                    },
                 },
                 "brand_category": {
-                    "type": "search_as_you_type",
+                    "type": "text",
                     "analyzer": "lowercase_analyzer",
+                    "fields": {
+                        "autocomplete": {
+                            "type": "search_as_you_type",
+                            "analyzer": "lowercase_analyzer",
+                        }
+                    },
                 },
                 "brand_category_product_type": {
-                    "type": "search_as_you_type",
+                    "type": "text",
                     "analyzer": "lowercase_analyzer",
+                    "fields": {
+                        "autocomplete": {
+                            "type": "search_as_you_type",
+                            "analyzer": "lowercase_analyzer",
+                        }
+                    },
                 },
             }
         }
 
-    elif index_type == ESCollection.PRODUCT_V6.value:
+    elif index_type == ESCollection.PRODUCT_V7.value:
         mappings = {
             "properties": {
                 "suggest": {
@@ -74,8 +92,8 @@ async def sync_product_suggest_data_es_v6(
     Sync product + autosuggest data using offset-based batching
     """
 
-    autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V6.value
-    product_index = ESCollection.PRODUCT_V6.value
+    autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+    product_index = ESCollection.PRODUCT_V7.value
 
     autosuggest_service = ElasticsearchService(es, autosuggest_index)
     product_service = ElasticsearchService(es, product_index)
