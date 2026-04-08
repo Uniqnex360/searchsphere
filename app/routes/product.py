@@ -673,11 +673,6 @@ async def product_list_v6(
 #         "results": suggestions[:size],
 #     }
 
-from fastapi import APIRouter, Query, Depends
-from elasticsearch import Elasticsearch
-
-router = APIRouter()
-
 
 @router.get("/product/v6/auto-complete/")
 async def get_product_auto_complete_v6(
