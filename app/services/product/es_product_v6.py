@@ -858,7 +858,7 @@ from elasticsearch.helpers import streaming_bulk
 
 
 async def sync_product_suggest_data_es_v6(
-    es: Elasticsearch, session: AsyncSession, batch_size: int = 100
+    es: Elasticsearch, session: AsyncSession, batch_size: int = 30
 ) -> dict:
 
     autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
