@@ -209,6 +209,7 @@ async def sync_products_to_es_v5(
 
             all_suggestions += [v for v in [product.mpn, product.sku] if v]
             all_suggestions = list(dict.fromkeys(all_suggestions))
+            all_suggestions.append(product.product_name)
 
             data = {
                 "product_name": product.product_name,

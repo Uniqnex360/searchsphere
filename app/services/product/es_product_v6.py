@@ -85,247 +85,251 @@ async def create_or_get_index_v6(es: Elasticsearch, index_name: str, index_type:
     return index_name
 
 
-async def sync_product_suggest_data_es_v6(
-    es: Elasticsearch, session: AsyncSession, batch_size: int = 100
-) -> dict:
-    """
-    Sync product + autosuggest data using offset-based batching
-    """
+# async def sync_product_suggest_data_es_v6(
+#     es: Elasticsearch, session: AsyncSession, batch_size: int = 100
+# ) -> dict:
+#     """
+#     Sync product + autosuggest data using offset-based batching
+#     """
 
-    autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
-    product_index = ESCollection.PRODUCT_V7.value
+#     autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+#     product_index = ESCollection.PRODUCT_V7.value
 
-    autosuggest_service = ElasticsearchService(es, autosuggest_index)
-    product_service = ElasticsearchService(es, product_index)
+#     autosuggest_service = ElasticsearchService(es, autosuggest_index)
+#     product_service = ElasticsearchService(es, product_index)
 
-    # Ensure indices exist
-    await create_or_get_index_v6(es, autosuggest_index, autosuggest_index)
-    await create_or_get_index_v6(es, product_index, product_index)
+#     # Ensure indices exist
+#     await create_or_get_index_v6(es, autosuggest_index, autosuggest_index)
+#     await create_or_get_index_v6(es, product_index, product_index)
 
-    offset = 0
-    total_processed = 0
-    batch_number = 1
+#     offset = 0
+#     total_processed = 0
+#     batch_number = 1
 
-    print("🚀 Starting sync...")
+#     print("🚀 Starting sync...")
 
-    while True:
-        print(f"\n📦 Fetching batch {batch_number} (offset={offset})")
+#     while True:
+#         print(f"\n📦 Fetching batch {batch_number} (offset={offset})")
 
-        result = await session.execute(
-            select(Product)
-            .options(
-                selectinload(Product.brand),
-                selectinload(Product.category),
-                selectinload(Product.images),
-                selectinload(Product.features),
-                selectinload(Product.attributes),
-                selectinload(Product.videos),
-                selectinload(Product.documents),
-                selectinload(Product.category),
-                selectinload(Product.industry),
-                selectinload(Product.product_type),
-            )
-            .order_by(Product.id)  # ⚠️ IMPORTANT for consistent pagination
-            .offset(offset)
-            .limit(batch_size)
-        )
+#         result = await session.execute(
+#             select(Product)
+#             .options(
+#                 selectinload(Product.brand),
+#                 selectinload(Product.category),
+#                 selectinload(Product.images),
+#                 selectinload(Product.features),
+#                 selectinload(Product.attributes),
+#                 selectinload(Product.videos),
+#                 selectinload(Product.documents),
+#                 selectinload(Product.category),
+#                 selectinload(Product.industry),
+#                 selectinload(Product.product_type),
+#             )
+#             .order_by(Product.id)  # ⚠️ IMPORTANT for consistent pagination
+#             .offset(offset)
+#             .limit(batch_size)
+#         )
 
-        products = result.scalars().all()
+#         products = result.scalars().all()
 
-        if not products:
-            print("✅ No more data to process.")
-            break
+#         if not products:
+#             print("✅ No more data to process.")
+#             break
 
-        autosuggest_actions = []
-        product_actions = []
+#         autosuggest_actions = []
+#         product_actions = []
 
-        for product in products:
+#         for product in products:
 
-            data = {
-                # search
-                "product_name": product.product_name,
-                # identifiers
-                "sku": product.sku,
-                "mpn": product.mpn,
-                "gtin": product.gtin,
-                "ean": product.ean,
-                "upc": product.upc,
-                # relations (🔥 updated)
-                "product_type": (
-                    product.product_type.product_type if product.product_type else None
-                ),
-                "industry_name": (
-                    product.industry.industry_name if product.industry else None
-                ),
-                "category": product.category.name if product.category else None,
-                "category_name": product.category.name if product.category else None,
-                # misc
-                "taxonomy": product.taxonomy,
-                "country_of_origin": product.country_of_origin,
-                "warranty": product.warranty,
-                # numeric
-                "weight": product.weight,
-                "length": product.length,
-                "width": product.width,
-                "height": product.height,
-                "base_price": product.base_price,
-                "sale_price": product.sale_price,
-                "selling_price": product.selling_price,
-                "special_price": product.special_price,
-                # units
-                "weight_unit": product.weight_unit,
-                "dimension_unit": product.dimension_unit,
-                "currency": product.currency,
-                "stock_status": product.stock_status,
-                # vendor
-                "vendor_name": product.vendor_name,
-                "vendor_sku": product.vendor_sku,
-                # descriptions
-                "short_description": product.short_description,
-                "long_description": product.long_description,
-                "meta_title": product.meta_title,
-                "meta_description": product.meta_description,
-                "search_keywords": product.search_keywords,
-                # stock
-                "stock_qty": product.stock_qty,
-                # nested
-                "features": [
-                    {"name": f.name, "value": f.value} for f in product.features
-                ],
-                "attributes": [
-                    {
-                        "name": attr.attribute_name,
-                        "value": attr.attribute_value,
-                        "uom": attr.attribute_uom,
-                    }
-                    for attr in product.attributes
-                ],
-                "images": [
-                    {"name": img.name, "url": img.url} for img in product.images
-                ],
-                "videos": [
-                    {"name": vid.name, "url": vid.url} for vid in product.videos
-                ],
-                "documents": [
-                    {"name": doc.name, "url": doc.url} for doc in product.documents
-                ],
-            }
+#             data = {
+#                 # search
+#                 "product_name": product.product_name,
+#                 # identifiers
+#                 "sku": product.sku,
+#                 "mpn": product.mpn,
+#                 "gtin": product.gtin,
+#                 "ean": product.ean,
+#                 "upc": product.upc,
+#                 # relations (🔥 updated)
+#                 "product_type": (
+#                     product.product_type.product_type if product.product_type else None
+#                 ),
+#                 "industry_name": (
+#                     product.industry.industry_name if product.industry else None
+#                 ),
+#                 "category": product.category.name if product.category else None,
+#                 "category_name": product.category.name if product.category else None,
+#                 # misc
+#                 "taxonomy": product.taxonomy,
+#                 "country_of_origin": product.country_of_origin,
+#                 "warranty": product.warranty,
+#                 # numeric
+#                 "weight": product.weight,
+#                 "length": product.length,
+#                 "width": product.width,
+#                 "height": product.height,
+#                 "base_price": product.base_price,
+#                 "sale_price": product.sale_price,
+#                 "selling_price": product.selling_price,
+#                 "special_price": product.special_price,
+#                 # units
+#                 "weight_unit": product.weight_unit,
+#                 "dimension_unit": product.dimension_unit,
+#                 "currency": product.currency,
+#                 "stock_status": product.stock_status,
+#                 # vendor
+#                 "vendor_name": product.vendor_name,
+#                 "vendor_sku": product.vendor_sku,
+#                 # descriptions
+#                 "short_description": product.short_description,
+#                 "long_description": product.long_description,
+#                 "meta_title": product.meta_title,
+#                 "meta_description": product.meta_description,
+#                 "search_keywords": product.search_keywords,
+#                 # stock
+#                 "stock_qty": product.stock_qty,
+#                 # nested
+#                 "features": [
+#                     {"name": f.name, "value": f.value} for f in product.features
+#                 ],
+#                 "attributes": [
+#                     {
+#                         "name": attr.attribute_name,
+#                         "value": attr.attribute_value,
+#                         "uom": attr.attribute_uom,
+#                     }
+#                     for attr in product.attributes
+#                 ],
+#                 "images": [
+#                     {"name": img.name, "url": img.url} for img in product.images
+#                 ],
+#                 "videos": [
+#                     {"name": vid.name, "url": vid.url} for vid in product.videos
+#                 ],
+#                 "documents": [
+#                     {"name": doc.name, "url": doc.url} for doc in product.documents
+#                 ],
+#             }
 
-            brand = product.brand
-            category = product.category
-            product_type_obj = product.product_type
-            attributes = product.attributes
+#             brand = product.brand
+#             category = product.category
+#             product_type_obj = product.product_type
+#             attributes = product.attributes
 
-            if not brand or not category or not category.name or not product_type_obj:
-                continue
+#             if not brand or not category or not category.name or not product_type_obj:
+#                 continue
 
-            # -------- Build basic suggestions --------
-            new_entry = f"{brand.brand_name} {category.name}"
-            product_type_entry = (
-                f"{brand.brand_name} {category.name} {product_type_obj.product_type}"
-            )
+#             # -------- Build basic suggestions --------
+#             new_entry = f"{brand.brand_name} {category.name}"
+#             product_type_entry = (
+#                 f"{brand.brand_name} {category.name} {product_type_obj.product_type}"
+#             )
 
-            suggest_set = set()
-            suggest_set.add(brand.brand_name)
-            suggest_set.add(new_entry)
-            suggest_set.add(product_type_entry)
+#             suggest_set = set()
+#             suggest_set.add(brand.brand_name)
+#             suggest_set.add(new_entry)
+#             suggest_set.add(product_type_entry)
+#             suggest_set.add(product.product_name)
+#             suggest_set.add(product.mpn)
+#             suggest_set.add(product.sku)
 
-            # -------- Build attribute-based suggestions --------
-            attribute_entries = []
-            for attr in attributes:
-                if attr.attribute_name and attr.attribute_value:
-                    attr_str = f"{attr.attribute_name} {attr.attribute_value}"
-                    full_entry = f"{brand.brand_name} {category.name} {product_type_obj.product_type} {attr_str}"
-                    attribute_entries.append(full_entry)
-                    suggest_set.add(full_entry)  # also add to product suggest set
 
-            # -------- Brand update for autosuggest --------
-            autosuggest_actions.append(
-                {
-                    "_op_type": "update",
-                    "_id": brand.id,
-                    "script": {
-                        "source": """
-                            if (ctx._source.brand_category == null) {
-                                ctx._source.brand_category = params.new_entries;
-                            } else {
-                                for (entry in params.new_entries) {
-                                    if (!ctx._source.brand_category.contains(entry)) {
-                                        ctx._source.brand_category.add(entry);
-                                    }
-                                }
-                            }
+#             # -------- Build attribute-based suggestions --------
+#             attribute_entries = []
+#             for attr in attributes:
+#                 if attr.attribute_name and attr.attribute_value:
+#                     attr_str = f"{attr.attribute_name} {attr.attribute_value}"
+#                     full_entry = f"{brand.brand_name} {category.name} {product_type_obj.product_type} {attr_str}"
+#                     attribute_entries.append(full_entry)
+#                     suggest_set.add(full_entry)  # also add to product suggest set
 
-                            if (ctx._source.brand_category_product_type == null) {
-                                ctx._source.brand_category_product_type = params.new_entries_product_type;
-                            } else {
-                                for (entry in params.new_entries_product_type) {
-                                    if (!ctx._source.brand_category_product_type.contains(entry)) {
-                                        ctx._source.brand_category_product_type.add(entry);
-                                    }
-                                }
-                            }
+#             # -------- Brand update for autosuggest --------
+#             autosuggest_actions.append(
+#                 {
+#                     "_op_type": "update",
+#                     "_id": brand.id,
+#                     "script": {
+#                         "source": """
+#                             if (ctx._source.brand_category == null) {
+#                                 ctx._source.brand_category = params.new_entries;
+#                             } else {
+#                                 for (entry in params.new_entries) {
+#                                     if (!ctx._source.brand_category.contains(entry)) {
+#                                         ctx._source.brand_category.add(entry);
+#                                     }
+#                                 }
+#                             }
 
-                            if (ctx._source.brand_category_product_type_attribute == null) {
-                                ctx._source.brand_category_product_type_attribute = params.new_entries_attribute;
-                            } else {
-                                for (entry in params.new_entries_attribute) {
-                                    if (!ctx._source.brand_category_product_type_attribute.contains(entry)) {
-                                        ctx._source.brand_category_product_type_attribute.add(entry);
-                                    }
-                                }
-                            }
-                        """,
-                        "params": {
-                            "new_entries": [new_entry],
-                            "new_entries_product_type": [product_type_entry],
-                            "new_entries_attribute": attribute_entries,
-                        },
-                    },
-                    "upsert": {
-                        "brand_name": brand.brand_name,
-                        "brand_category": [new_entry],
-                        "brand_category_product_type": [product_type_entry],
-                        "brand_category_product_type_attribute": attribute_entries,
-                    },
-                }
-            )
+#                             if (ctx._source.brand_category_product_type == null) {
+#                                 ctx._source.brand_category_product_type = params.new_entries_product_type;
+#                             } else {
+#                                 for (entry in params.new_entries_product_type) {
+#                                     if (!ctx._source.brand_category_product_type.contains(entry)) {
+#                                         ctx._source.brand_category_product_type.add(entry);
+#                                     }
+#                                 }
+#                             }
 
-            # -------- Product Doc --------
-            product_actions.append(
-                {
-                    "_op_type": "index",
-                    "_id": product.id,
-                    "brand": brand.brand_name,
-                    "suggest": list(
-                        suggest_set
-                    ),  # unique suggestions including attributes
-                    **data,
-                }
-            )
+#                             if (ctx._source.brand_category_product_type_attribute == null) {
+#                                 ctx._source.brand_category_product_type_attribute = params.new_entries_attribute;
+#                             } else {
+#                                 for (entry in params.new_entries_attribute) {
+#                                     if (!ctx._source.brand_category_product_type_attribute.contains(entry)) {
+#                                         ctx._source.brand_category_product_type_attribute.add(entry);
+#                                     }
+#                                 }
+#                             }
+#                         """,
+#                         "params": {
+#                             "new_entries": [new_entry],
+#                             "new_entries_product_type": [product_type_entry],
+#                             "new_entries_attribute": attribute_entries,
+#                         },
+#                     },
+#                     "upsert": {
+#                         "brand_name": brand.brand_name,
+#                         "brand_category": [new_entry],
+#                         "brand_category_product_type": [product_type_entry],
+#                         "brand_category_product_type_attribute": attribute_entries,
+#                     },
+#                 }
+#             )
 
-        # Bulk insert
-        auto_success, auto_errors = autosuggest_service.bulk(autosuggest_actions)
-        prod_success, prod_errors = product_service.bulk(product_actions)
+#             # -------- Product Doc --------
+#             product_actions.append(
+#                 {
+#                     "_op_type": "index",
+#                     "_id": product.id,
+#                     "brand": brand.brand_name,
+#                     "suggest": list(
+#                         suggest_set
+#                     ),  # unique suggestions including attributes
+#                     **data,
+#                 }
+#             )
 
-        print(f"✅ Autosuggest indexed: {auto_success}")
-        print(f"✅ Product indexed: {prod_success}")
+#         # Bulk insert
+#         auto_success, auto_errors = autosuggest_service.bulk(autosuggest_actions)
+#         prod_success, prod_errors = product_service.bulk(product_actions)
 
-        if auto_errors:
-            print(f"❌ Autosuggest errors: {len(auto_errors)}")
+#         print(f"✅ Autosuggest indexed: {auto_success}")
+#         print(f"✅ Product indexed: {prod_success}")
 
-        if prod_errors:
-            print(f"❌ Product errors: {len(prod_errors)}")
+#         if auto_errors:
+#             print(f"❌ Autosuggest errors: {len(auto_errors)}")
 
-        total_processed += len(products)
-        offset += batch_size
-        batch_number += 1
+#         if prod_errors:
+#             print(f"❌ Product errors: {len(prod_errors)}")
 
-        print(f"📊 Total processed so far: {total_processed}")
+#         total_processed += len(products)
+#         offset += batch_size
+#         batch_number += 1
 
-    print(f"\n🎉 Sync completed! Total records processed: {total_processed}")
+#         print(f"📊 Total processed so far: {total_processed}")
 
-    return {"total_processed": total_processed}
+#     print(f"\n🎉 Sync completed! Total records processed: {total_processed}")
+
+#     return {"total_processed": total_processed}
 
 
 # async def get_product_list_v6(
@@ -608,11 +612,33 @@ async def get_product_list_v6(
     # Build query
     # -----------------------------
     if query:
+        # query_body = {
+        #     "bool": {
+        #         "should": [
+        #             {"term": {"suggest.keyword": query}},  # exact match
+        #             {"match_phrase_prefix": {"suggest": query}},  # prefix match
+        #         ],
+        #         "minimum_should_match": 1,
+        #     }
+        # }
         query_body = {
             "bool": {
                 "should": [
-                    {"term": {"suggest.keyword": query}},  # exact match
-                    {"match_phrase_prefix": {"suggest": query}},  # prefix match
+                    {
+                        "match": {
+                            "suggest": {
+                                "query": query,
+                                "operator": "and",
+                                "fuzziness": "AUTO",
+                                "boost": 2,
+                            }
+                        }
+                    },
+                    {
+                        "match_phrase_prefix": {
+                            "suggest": {"query": query, "boost": 1.5}
+                        }
+                    },
                 ],
                 "minimum_should_match": 1,
             }
@@ -667,7 +693,8 @@ async def get_product_list_v6(
             "product_type",
             "suggest",
         ],
-        "query": {"bool": {"must": [query_body]}},
+        # "query": {"bool": {"must": [query_body]}},
+        "query": query_body,
         "post_filter": {"bool": {"must": filters}},
         "sort": es_sort,
         "aggs": {
@@ -823,3 +850,276 @@ async def get_product_list_v6(
             "product_type": product_type_list,
         },
     }
+
+
+from elasticsearch.helpers import streaming_bulk
+
+from elasticsearch.helpers import streaming_bulk
+
+
+async def sync_product_suggest_data_es_v6(
+    es: Elasticsearch, session: AsyncSession, batch_size: int = 100
+) -> dict:
+
+    autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+    product_index = ESCollection.PRODUCT_V7.value
+
+    autosuggest_service = ElasticsearchService(es, autosuggest_index)
+    product_service = ElasticsearchService(es, product_index)
+
+    await create_or_get_index_v6(es, autosuggest_index, autosuggest_index)
+    await create_or_get_index_v6(es, product_index, product_index)
+
+    offset = 0
+    total_processed = 0
+    batch_number = 1
+
+    print("🚀 Starting sync...")
+
+    # ======================================
+    # 🔥 BULK LOGGER FUNCTION (FIXED)
+    # ======================================
+    def log_bulk(actions, index_name):
+        created = updated = failed = noop = 0
+
+        if not actions:
+            return created, updated, noop, failed
+
+        # ✅ Use generator (IMPORTANT FIX)
+        def generate():
+            for action in actions:
+                new_action = action.copy()
+                new_action["_index"] = index_name
+                yield new_action
+
+        for ok, item in streaming_bulk(es, generate()):
+            if not ok:
+                failed += 1
+                continue
+
+            op_type = list(item.keys())[0]
+            result = item[op_type].get("result")
+
+            if result == "created":
+                created += 1
+            elif result == "updated":
+                updated += 1
+            elif result == "noop":
+                noop += 1
+
+        return created, updated, noop, failed
+
+    # ======================================
+    # 🔁 MAIN LOOP
+    # ======================================
+    while True:
+        print(f"\n📦 Fetching batch {batch_number} (offset={offset})")
+
+        result = await session.execute(
+            select(Product)
+            .options(
+                selectinload(Product.brand),
+                selectinload(Product.category),
+                selectinload(Product.images),
+                selectinload(Product.features),
+                selectinload(Product.attributes),
+                selectinload(Product.videos),
+                selectinload(Product.documents),
+                selectinload(Product.industry),
+                selectinload(Product.product_type),
+            )
+            .order_by(Product.id)
+            .offset(offset)
+            .limit(batch_size)
+        )
+
+        products = result.scalars().all()
+
+        if not products:
+            print("✅ No more data to process.")
+            break
+
+        autosuggest_actions = []
+        product_actions = []
+        brand_count = 0
+        for product in products:
+
+            brand = product.brand
+            category = product.category
+            product_type_obj = product.product_type
+            attributes = product.attributes
+
+            # 🔴 skip only if brand missing
+            if not brand:
+                brand_count += 1
+                continue
+
+            # -------- Product Data --------
+            data = {
+                "product_name": product.product_name,
+                "sku": product.sku,
+                "mpn": product.mpn,
+                "gtin": product.gtin,
+                "ean": product.ean,
+                "upc": product.upc,
+                "product_type": (
+                    product_type_obj.product_type if product_type_obj else None
+                ),
+                "industry_name": (
+                    product.industry.industry_name if product.industry else None
+                ),
+                "category": category.name if category else None,
+                "category_name": category.name if category else None,
+                "taxonomy": product.taxonomy,
+                "country_of_origin": product.country_of_origin,
+                "warranty": product.warranty,
+                "weight": product.weight,
+                "length": product.length,
+                "width": product.width,
+                "height": product.height,
+                "base_price": product.base_price,
+                "sale_price": product.sale_price,
+                "selling_price": product.selling_price,
+                "special_price": product.special_price,
+                "weight_unit": product.weight_unit,
+                "dimension_unit": product.dimension_unit,
+                "currency": product.currency,
+                "stock_status": product.stock_status,
+                "vendor_name": product.vendor_name,
+                "vendor_sku": product.vendor_sku,
+                "short_description": product.short_description,
+                "long_description": product.long_description,
+                "meta_title": product.meta_title,
+                "meta_description": product.meta_description,
+                "search_keywords": product.search_keywords,
+                "stock_qty": product.stock_qty,
+                "features": [
+                    {"name": f.name, "value": f.value} for f in product.features
+                ],
+                "attributes": [
+                    {
+                        "name": attr.attribute_name,
+                        "value": attr.attribute_value,
+                        "uom": attr.attribute_uom,
+                    }
+                    for attr in product.attributes
+                ],
+                "images": [
+                    {"name": img.name, "url": img.url} for img in product.images
+                ],
+                "videos": [
+                    {"name": vid.name, "url": vid.url} for vid in product.videos
+                ],
+                "documents": [
+                    {"name": doc.name, "url": doc.url} for doc in product.documents
+                ],
+            }
+
+            # -------- Suggestions --------
+            brand_name = brand.brand_name
+            category_name = category.name if category else ""
+            product_type_name = (
+                product_type_obj.product_type if product_type_obj else ""
+            )
+
+            new_entry = f"{brand_name} {category_name}".strip()
+            product_type_entry = (
+                f"{brand_name} {category_name} {product_type_name}".strip()
+            )
+
+            suggest_set = set([brand_name, new_entry, product_type_entry])
+            suggest_set.add(product.product_name)
+            suggest_set.add(product.mpn)
+            suggest_set.add(product.sku)
+
+            attribute_entries = []
+            for attr in attributes:
+                if attr.attribute_name and attr.attribute_value:
+                    full_entry = f"{brand_name} {category_name} {product_type_name} {attr.attribute_name} {attr.attribute_value}".strip()
+                    attribute_entries.append(full_entry)
+                    suggest_set.add(full_entry)
+
+            # -------- Autosuggest --------
+            autosuggest_actions.append(
+                {
+                    "_op_type": "update",
+                    "_id": brand.id,
+                    "script": {
+                        "source": """
+                        if (ctx._source.brand_category == null) {
+                            ctx._source.brand_category = params.new_entries;
+                        } else {
+                            for (entry in params.new_entries) {
+                                if (!ctx._source.brand_category.contains(entry)) {
+                                    ctx._source.brand_category.add(entry);
+                                }
+                            }
+                        }
+                    """,
+                        "params": {
+                            "new_entries": [new_entry],
+                        },
+                    },
+                    "upsert": {
+                        "brand_name": brand_name,
+                        "brand_category": [new_entry],
+                    },
+                }
+            )
+
+            # -------- Product --------
+            product_actions.append(
+                {
+                    "_op_type": "index",
+                    "_id": product.id,
+                    "brand": brand_name,
+                    "suggest": list(suggest_set),
+                    **data,
+                }
+            )
+
+        # ================================
+        # 📊 DEBUG COUNTS
+        # ================================
+        print(f"👉 Autosuggest actions: {len(autosuggest_actions)}")
+        print(f"👉 Product actions: {len(product_actions)}")
+
+        if not autosuggest_actions and not product_actions:
+            print("⚠️ No valid actions in this batch", brand_count)
+            offset += batch_size
+            batch_number += 1
+            continue
+
+        # ================================
+        # 🔥 EXECUTE + LOG
+        # ================================
+        print("\n🔍 Processing Autosuggest...")
+        a_created, a_updated, a_noop, a_failed = log_bulk(
+            autosuggest_actions, autosuggest_index
+        )
+
+        print("🔍 Processing Products...")
+        p_created, p_updated, p_noop, p_failed = log_bulk(
+            product_actions, product_index
+        )
+
+        # ================================
+        # 📊 PRINT RESULT
+        # ================================
+        print("\n📊 Batch Result:")
+        print(
+            f"Autosuggest → Created: {a_created}, Updated: {a_updated}, Noop: {a_noop}, Failed: {a_failed}"
+        )
+        print(
+            f"Products    → Created: {p_created}, Updated: {p_updated}, Noop: {p_noop}, Failed: {p_failed}"
+        )
+
+        total_processed += len(products)
+        offset += batch_size
+        batch_number += 1
+
+        print(f"📦 Total processed so far: {total_processed}")
+
+    print(f"\n🎉 Sync completed! Total records processed: {total_processed}")
+
+    return {"total_processed": total_processed}
