@@ -21,7 +21,9 @@ class Category(MPTTBase, table=True):
 
     parent_id: Optional[int] = Field(default=None, foreign_key="category.id")
 
-    industry_id: int = Field(default=None, sa_column=Column(ForeignKey("industry.id")))
+    industry_id: Optional[int] = Field(
+        default=None, sa_column=Column(ForeignKey("industry.id"), nullable=True)
+    )
 
     industry: Optional["Industry"] = Relationship(back_populates="categories")
     products: List["Product"] = Relationship(back_populates="category")

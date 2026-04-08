@@ -620,9 +620,7 @@ async def handle_category(
     # ============================================================
     # 🔥 STEP 1: Extract unique (industry, taxonomy)
     # ============================================================
-    unique_pairs = (
-        df.select(["industry_name", "taxonomy"]).drop_nulls().unique().to_dicts()
-    )
+    unique_pairs = df.select(["industry_name", "taxonomy"]).unique().to_dicts()
 
     category_cache = {}
 
@@ -630,25 +628,23 @@ async def handle_category(
     # 🔥 STEP 2: Process each unique path ONCE
     # ============================================================
     for item in unique_pairs:
-        industry_name = item["industry_name"]
-        taxonomy = item["taxonomy"]
+        industry_name = item.get("industry_name")
+        taxonomy = item.get("taxonomy")
 
         if not taxonomy:
             continue
 
-        cache_key = (industry_name, taxonomy)
+        # ✅ allow industry_name to be None
+        cache_key = (industry_name or None, taxonomy)
 
         if cache_key in category_cache:
             continue
 
-        # ✅ Resolve industry_id from prebuilt map (NO DB hit)
-        industry_id = industry_map.get(industry_name)
-
-        if not industry_id:
-            continue  # or raise error
+        # ✅ Resolve industry_id (can be None now)
+        industry_id = industry_map.get(industry_name) if industry_name else None
 
         # ========================================================
-        # 🔥 Build category path (optimized)
+        # 🔥 Build category path
         # ========================================================
         parts = [p.strip() for p in taxonomy.split(">") if p.strip()]
 
@@ -659,7 +655,7 @@ async def handle_category(
             node = await category_service.get_or_create_node(
                 db=session,
                 name=level_name,
-                industry_id=industry_id,
+                industry_id=industry_id,  # ✅ can be None
                 parent=parent,
             )
             parent = node
@@ -972,7 +968,6 @@ async def upload_products_csv_v3(
 
             # ---- COMMIT ----
             await session.commit()
-
 
             batch_time = round(time.perf_counter() - batch_start_time, 2)
 

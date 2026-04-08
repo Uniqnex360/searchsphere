@@ -858,14 +858,14 @@ from elasticsearch.helpers import streaming_bulk
 
 
 async def sync_product_suggest_data_es_v6(
-    es: Elasticsearch, session: AsyncSession, batch_size: int = 30
+    es: Elasticsearch, session: AsyncSession, batch_size: int = 30, start_id: int = 1
 ) -> dict:
 
     autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
     product_index = ESCollection.PRODUCT_V7.value
 
-    autosuggest_service = ElasticsearchService(es, autosuggest_index)
-    product_service = ElasticsearchService(es, product_index)
+    # autosuggest_service = ElasticsearchService(es, autosuggest_index)
+    # product_service = ElasticsearchService(es, product_index)
 
     await create_or_get_index_v6(es, autosuggest_index, autosuggest_index)
     await create_or_get_index_v6(es, product_index, product_index)
@@ -928,6 +928,7 @@ async def sync_product_suggest_data_es_v6(
                 selectinload(Product.industry),
                 selectinload(Product.product_type),
             )
+            .where(Product.id >= start_id)
             .order_by(Product.id)
             .offset(offset)
             .limit(batch_size)

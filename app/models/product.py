@@ -61,7 +61,7 @@ class Product(BaseModel, table=True):
     prop65_warning: Optional[str] = None
 
     # FK
-    industry_id: int = Field(foreign_key="industry.id")
+    industry_id: Optional[int] = Field(default=None, foreign_key="industry.id")
     category_id: int = Field(foreign_key="category.id")
     brand_id: Optional[int] = Field(foreign_key="brand.id")
     product_type_id: Optional[int] = Field(foreign_key="product_type.id")
