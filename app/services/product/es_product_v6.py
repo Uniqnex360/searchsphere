@@ -854,18 +854,16 @@ async def get_product_list_v6(
 
 from elasticsearch.helpers import streaming_bulk
 
-from elasticsearch.helpers import streaming_bulk
-
 
 async def sync_product_suggest_data_es_v6(
-    es: Elasticsearch, session: AsyncSession, batch_size: int = 30, start_id: int = 1
+    es: Elasticsearch,
+    session: AsyncSession,
+    batch_size: int = 30,
+    start_id: int = 1,
 ) -> dict:
 
     autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
     product_index = ESCollection.PRODUCT_V7.value
-
-    # autosuggest_service = ElasticsearchService(es, autosuggest_index)
-    # product_service = ElasticsearchService(es, product_index)
 
     await create_or_get_index_v6(es, autosuggest_index, autosuggest_index)
     await create_or_get_index_v6(es, product_index, product_index)
@@ -876,16 +874,15 @@ async def sync_product_suggest_data_es_v6(
 
     print("🚀 Starting sync...")
 
-    # ======================================
-    # 🔥 BULK LOGGER FUNCTION (FIXED)
-    # ======================================
+    # ===========================
+    # Bulk helper with error print
+    # ===========================
     def log_bulk(actions, index_name):
         created = updated = failed = noop = 0
 
         if not actions:
             return created, updated, noop, failed
 
-        # ✅ Use generator (IMPORTANT FIX)
         def generate():
             for action in actions:
                 new_action = action.copy()
@@ -894,12 +891,12 @@ async def sync_product_suggest_data_es_v6(
 
         for ok, item in streaming_bulk(es, generate()):
             if not ok:
+                print("❌ Bulk item failed:", item)
                 failed += 1
                 continue
 
             op_type = list(item.keys())[0]
             result = item[op_type].get("result")
-
             if result == "created":
                 created += 1
             elif result == "updated":
@@ -909,9 +906,9 @@ async def sync_product_suggest_data_es_v6(
 
         return created, updated, noop, failed
 
-    # ======================================
-    # 🔁 MAIN LOOP
-    # ======================================
+    # ===========================
+    # Main loop
+    # ===========================
     while True:
         print(f"\n📦 Fetching batch {batch_number} (offset={offset})")
 
@@ -935,88 +932,84 @@ async def sync_product_suggest_data_es_v6(
         )
 
         products = result.scalars().all()
-
         if not products:
             print("✅ No more data to process.")
             break
 
         autosuggest_actions = []
         product_actions = []
-        brand_count = 0
+
         for product in products:
-
             brand = product.brand
-            category = product.category
-            product_type_obj = product.product_type
-            attributes = product.attributes
-
-            # 🔴 skip only if brand missing
             if not brand:
-                brand_count += 1
                 continue
 
-            # -------- Product Data --------
+            category = product.category
+            product_type_obj = product.product_type
+            attributes = product.attributes or []
+            features = product.features or []
+            images = product.images or []
+            videos = product.videos or []
+            documents = product.documents or []
+
+            # --------------------
+            # Product payload
+            # --------------------
             data = {
-                "product_name": product.product_name,
-                "sku": product.sku,
-                "mpn": product.mpn,
-                "gtin": product.gtin,
-                "ean": product.ean,
-                "upc": product.upc,
+                "product_name": product.product_name or "",
+                "sku": product.sku or "",
+                "mpn": product.mpn or "",
+                "gtin": product.gtin or "",
+                "ean": product.ean or "",
+                "upc": product.upc or "",
                 "product_type": (
-                    product_type_obj.product_type if product_type_obj else None
+                    product_type_obj.product_type if product_type_obj else ""
                 ),
                 "industry_name": (
-                    product.industry.industry_name if product.industry else None
+                    product.industry.industry_name if product.industry else ""
                 ),
-                "category": category.name if category else None,
-                "category_name": category.name if category else None,
-                "taxonomy": product.taxonomy,
-                "country_of_origin": product.country_of_origin,
-                "warranty": product.warranty,
-                "weight": product.weight,
-                "length": product.length,
-                "width": product.width,
-                "height": product.height,
-                "base_price": product.base_price,
-                "sale_price": product.sale_price,
-                "selling_price": product.selling_price,
-                "special_price": product.special_price,
-                "weight_unit": product.weight_unit,
-                "dimension_unit": product.dimension_unit,
-                "currency": product.currency,
-                "stock_status": product.stock_status,
-                "vendor_name": product.vendor_name,
-                "vendor_sku": product.vendor_sku,
-                "short_description": product.short_description,
-                "long_description": product.long_description,
-                "meta_title": product.meta_title,
-                "meta_description": product.meta_description,
-                "search_keywords": product.search_keywords,
-                "stock_qty": product.stock_qty,
-                "features": [
-                    {"name": f.name, "value": f.value} for f in product.features
-                ],
+                "category_name": category.name if category else "",
+                "taxonomy": product.taxonomy or "",
+                "country_of_origin": product.country_of_origin or "",
+                "warranty": product.warranty or "",
+                "weight": product.weight or 0,
+                "length": product.length or 0,
+                "width": product.width or 0,
+                "height": product.height or 0,
+                "base_price": product.base_price or 0,
+                "sale_price": product.sale_price or 0,
+                "selling_price": product.selling_price or 0,
+                "special_price": product.special_price or 0,
+                "weight_unit": product.weight_unit or "",
+                "dimension_unit": product.dimension_unit or "",
+                "currency": product.currency or "",
+                "stock_status": product.stock_status or "",
+                "vendor_name": product.vendor_name or "",
+                "vendor_sku": product.vendor_sku or "",
+                "short_description": product.short_description or "",
+                "long_description": product.long_description or "",
+                "meta_title": product.meta_title or "",
+                "meta_description": product.meta_description or "",
+                "search_keywords": product.search_keywords or "",
+                "stock_qty": product.stock_qty or 0,
+                "features": [{"name": f.name, "value": f.value} for f in features],
                 "attributes": [
                     {
-                        "name": attr.attribute_name,
-                        "value": attr.attribute_value,
-                        "uom": attr.attribute_uom,
+                        "name": a.attribute_name,
+                        "value": a.attribute_value,
+                        "uom": a.attribute_uom,
                     }
-                    for attr in product.attributes
+                    for a in attributes
+                    if a.attribute_name and a.attribute_value
                 ],
-                "images": [
-                    {"name": img.name, "url": img.url} for img in product.images
-                ],
-                "videos": [
-                    {"name": vid.name, "url": vid.url} for vid in product.videos
-                ],
-                "documents": [
-                    {"name": doc.name, "url": doc.url} for doc in product.documents
-                ],
+                "images": [{"name": i.name, "url": i.url} for i in images],
+                "videos": [{"name": v.name, "url": v.url} for v in videos],
+                "documents": [{"name": d.name, "url": d.url} for d in documents],
             }
 
-            # -------- Suggestions --------
+            # --------------------
+            # Suggestions payload
+            # --------------------
             brand_name = brand.brand_name
             category_name = category.name if category else ""
             product_type_name = (
@@ -1027,20 +1020,23 @@ async def sync_product_suggest_data_es_v6(
             product_type_entry = (
                 f"{brand_name} {category_name} {product_type_name}".strip()
             )
+            suggest_set = {
+                brand_name,
+                new_entry,
+                product_type_entry,
+                product.product_name or "",
+                product.mpn or "",
+                product.sku or "",
+            }
 
-            suggest_set = set([brand_name, new_entry, product_type_entry])
-            suggest_set.add(product.product_name)
-            suggest_set.add(product.mpn)
-            suggest_set.add(product.sku)
-
-            attribute_entries = []
             for attr in attributes:
                 if attr.attribute_name and attr.attribute_value:
                     full_entry = f"{brand_name} {category_name} {product_type_name} {attr.attribute_name} {attr.attribute_value}".strip()
-                    attribute_entries.append(full_entry)
                     suggest_set.add(full_entry)
 
-            # -------- Autosuggest --------
+            # --------------------
+            # Autosuggest safe script
+            # --------------------
             autosuggest_actions.append(
                 {
                     "_op_type": "update",
@@ -1049,26 +1045,24 @@ async def sync_product_suggest_data_es_v6(
                         "source": """
                         if (ctx._source.brand_category == null) {
                             ctx._source.brand_category = params.new_entries;
-                        } else {
-                            for (entry in params.new_entries) {
-                                if (!ctx._source.brand_category.contains(entry)) {
-                                    ctx._source.brand_category.add(entry);
-                                }
+                        } else if (!(ctx._source.brand_category instanceof List)) {
+                            ctx._source.brand_category = [];
+                        }
+                        for (entry in params.new_entries) {
+                            if (!ctx._source.brand_category.contains(entry)) {
+                                ctx._source.brand_category.add(entry);
                             }
                         }
                     """,
-                        "params": {
-                            "new_entries": [new_entry],
-                        },
+                        "params": {"new_entries": [new_entry]},
                     },
-                    "upsert": {
-                        "brand_name": brand_name,
-                        "brand_category": [new_entry],
-                    },
+                    "upsert": {"brand_name": brand_name, "brand_category": [new_entry]},
                 }
             )
 
-            # -------- Product --------
+            # --------------------
+            # Product safe indexing
+            # --------------------
             product_actions.append(
                 {
                     "_op_type": "index",
@@ -1079,48 +1073,30 @@ async def sync_product_suggest_data_es_v6(
                 }
             )
 
-        # ================================
-        # 📊 DEBUG COUNTS
-        # ================================
-        print(f"👉 Autosuggest actions: {len(autosuggest_actions)}")
-        print(f"👉 Product actions: {len(product_actions)}")
+        # --------------------
+        # Execute bulk safely
+        # --------------------
+        print(
+            f"Processing batch {batch_number} → Autosuggest: {len(autosuggest_actions)}, Products: {len(product_actions)}"
+        )
 
-        if not autosuggest_actions and not product_actions:
-            print("⚠️ No valid actions in this batch", brand_count)
-            offset += batch_size
-            batch_number += 1
-            continue
-
-        # ================================
-        # 🔥 EXECUTE + LOG
-        # ================================
-        print("\n🔍 Processing Autosuggest...")
         a_created, a_updated, a_noop, a_failed = log_bulk(
             autosuggest_actions, autosuggest_index
         )
-
-        print("🔍 Processing Products...")
         p_created, p_updated, p_noop, p_failed = log_bulk(
             product_actions, product_index
         )
 
-        # ================================
-        # 📊 PRINT RESULT
-        # ================================
-        print("\n📊 Batch Result:")
         print(
-            f"Autosuggest → Created: {a_created}, Updated: {a_updated}, Noop: {a_noop}, Failed: {a_failed}"
+            f"Batch {batch_number} result → Autosuggest: Created {a_created}, Updated {a_updated}, Failed {a_failed}"
         )
         print(
-            f"Products    → Created: {p_created}, Updated: {p_updated}, Noop: {p_noop}, Failed: {p_failed}"
+            f"Batch {batch_number} result → Products: Created {p_created}, Updated {p_updated}, Failed {p_failed}"
         )
 
         total_processed += len(products)
         offset += batch_size
         batch_number += 1
 
-        print(f"📦 Total processed so far: {total_processed}")
-
-    print(f"\n🎉 Sync completed! Total records processed: {total_processed}")
-
+    print(f"\n🎉 Sync completed! Total processed: {total_processed}")
     return {"total_processed": total_processed}
