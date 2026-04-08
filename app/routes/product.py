@@ -517,9 +517,11 @@ async def get_product_search_keywords_list(
 
 @router.post("/product/v6/mapping/")
 async def update_product_data_v6(
-    es: Elasticsearch = Depends(get_es), session: AsyncSession = Depends(get_session)
+    es: Elasticsearch = Depends(get_es),
+    session: AsyncSession = Depends(get_session),
+    start_id: int = 1,
 ):
-    await sync_product_suggest_data_es_v6(es, session)
+    await sync_product_suggest_data_es_v6(es, session, start_id=start_id)
     return {}
 
 
