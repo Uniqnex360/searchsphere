@@ -865,6 +865,7 @@ async def sync_product_suggest_data_es_v6(
     autosuggest_index = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
     product_index = ESCollection.PRODUCT_V7.value
 
+    # Ensure indexes exist
     await create_or_get_index_v6(es, autosuggest_index, autosuggest_index)
     await create_or_get_index_v6(es, product_index, product_index)
 
@@ -874,14 +875,15 @@ async def sync_product_suggest_data_es_v6(
 
     print("🚀 Starting sync...")
 
-    # ===========================
-    # Bulk helper with error print
-    # ===========================
+    # ======================
+    # Bulk helper with retry
+    # ======================
     def log_bulk(actions, index_name):
         created = updated = failed = noop = 0
-
         if not actions:
             return created, updated, noop, failed
+
+        failed_actions = []
 
         def generate():
             for action in actions:
@@ -893,6 +895,7 @@ async def sync_product_suggest_data_es_v6(
             if not ok:
                 print("❌ Bulk item failed:", item)
                 failed += 1
+                failed_actions.append(item)
                 continue
 
             op_type = list(item.keys())[0]
@@ -904,11 +907,29 @@ async def sync_product_suggest_data_es_v6(
             elif result == "noop":
                 noop += 1
 
+        # Retry failed actions once
+        if failed_actions:
+            print(f"🔄 Retrying {len(failed_actions)} failed actions...")
+            for ok, item in streaming_bulk(es, (i.copy() for i in failed_actions)):
+                if not ok:
+                    print("❌ Retry failed:", item)
+                    failed += 1
+                    continue
+
+                op_type = list(item.keys())[0]
+                result = item[op_type].get("result")
+                if result == "created":
+                    created += 1
+                elif result == "updated":
+                    updated += 1
+                elif result == "noop":
+                    noop += 1
+
         return created, updated, noop, failed
 
-    # ===========================
+    # ======================
     # Main loop
-    # ===========================
+    # ======================
     while True:
         print(f"\n📦 Fetching batch {batch_number} (offset={offset})")
 
@@ -992,25 +1013,28 @@ async def sync_product_suggest_data_es_v6(
                 "meta_description": product.meta_description or "",
                 "search_keywords": product.search_keywords or "",
                 "stock_qty": product.stock_qty or 0,
-                "features": [{"name": f.name, "value": f.value} for f in features],
+                "features": [
+                    {"name": f.name or "", "value": f.value or ""} for f in features
+                ],
                 "attributes": [
                     {
-                        "name": a.attribute_name,
-                        "value": a.attribute_value,
-                        "uom": a.attribute_uom,
+                        "name": a.attribute_name or "",
+                        "value": a.attribute_value or "",
+                        "uom": a.attribute_uom or "",
                     }
                     for a in attributes
-                    if a.attribute_name and a.attribute_value
                 ],
-                "images": [{"name": i.name, "url": i.url} for i in images],
-                "videos": [{"name": v.name, "url": v.url} for v in videos],
-                "documents": [{"name": d.name, "url": d.url} for d in documents],
+                "images": [{"name": i.name or "", "url": i.url or ""} for i in images],
+                "videos": [{"name": v.name or "", "url": v.url or ""} for v in videos],
+                "documents": [
+                    {"name": d.name or "", "url": d.url or ""} for d in documents
+                ],
             }
 
             # --------------------
             # Suggestions payload
             # --------------------
-            brand_name = brand.brand_name
+            brand_name = brand.brand_name or ""
             category_name = category.name if category else ""
             product_type_name = (
                 product_type_obj.product_type if product_type_obj else ""
@@ -1030,12 +1054,11 @@ async def sync_product_suggest_data_es_v6(
             }
 
             for attr in attributes:
-                if attr.attribute_name and attr.attribute_value:
-                    full_entry = f"{brand_name} {category_name} {product_type_name} {attr.attribute_name} {attr.attribute_value}".strip()
-                    suggest_set.add(full_entry)
+                full_entry = f"{brand_name} {category_name} {product_type_name} {attr.attribute_name or ''} {attr.attribute_value or ''}".strip()
+                suggest_set.add(full_entry)
 
             # --------------------
-            # Autosuggest safe script
+            # Autosuggest document (must create)
             # --------------------
             autosuggest_actions.append(
                 {
@@ -1043,25 +1066,28 @@ async def sync_product_suggest_data_es_v6(
                     "_id": brand.id,
                     "script": {
                         "source": """
-                        if (ctx._source.brand_category == null) {
-                            ctx._source.brand_category = params.new_entries;
-                        } else if (!(ctx._source.brand_category instanceof List)) {
-                            ctx._source.brand_category = [];
+                    if (ctx._source.brand_category == null) {
+                        ctx._source.brand_category = params.new_entries;
+                    } else if (!(ctx._source.brand_category instanceof List)) {
+                        ctx._source.brand_category = [];
+                    }
+                    for (entry in params.new_entries) {
+                        if (!ctx._source.brand_category.contains(entry)) {
+                            ctx._source.brand_category.add(entry);
                         }
-                        for (entry in params.new_entries) {
-                            if (!ctx._source.brand_category.contains(entry)) {
-                                ctx._source.brand_category.add(entry);
-                            }
-                        }
+                    }
                     """,
                         "params": {"new_entries": [new_entry]},
                     },
-                    "upsert": {"brand_name": brand_name, "brand_category": [new_entry]},
+                    "upsert": {
+                        "brand_name": brand_name,
+                        "brand_category": [new_entry],
+                    },
                 }
             )
 
             # --------------------
-            # Product safe indexing
+            # Product document
             # --------------------
             product_actions.append(
                 {
@@ -1079,7 +1105,6 @@ async def sync_product_suggest_data_es_v6(
         print(
             f"Processing batch {batch_number} → Autosuggest: {len(autosuggest_actions)}, Products: {len(product_actions)}"
         )
-
         a_created, a_updated, a_noop, a_failed = log_bulk(
             autosuggest_actions, autosuggest_index
         )
