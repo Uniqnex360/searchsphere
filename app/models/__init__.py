@@ -15,4 +15,4 @@ from .product import (
     ProductAttribute,
     ProductSearchResult,
 )
-
+from .app_import import APPImport
