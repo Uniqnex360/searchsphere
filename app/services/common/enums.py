@@ -19,3 +19,21 @@ class ESCollection(str, Enum):
     # v7
     PRODUCT_AUTO_SUGGEST_V7 = "product_auto_suggest_v7"
     PRODUCT_V7 = "product_v7"
+
+
+class CeleryTaskStatus(str, Enum):
+    """celery task status"""
+
+    PENDING = "Peding"
+    RECEIVED = "Received"
+    STARTED = "Started"
+    SUCCESS = "Success"
+    FAILURE = "Failure"
+    RETRY = "Retry"
+    REVOKED = "Revoked"
+    IGNORED = "Ignored"
+
+
+class ImportType(str, Enum):
+
+    PRODUCT = "product"

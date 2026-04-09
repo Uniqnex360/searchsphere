@@ -1,13 +1,16 @@
 from .common import (
     MPTTService,
+    SyncMPTTService,
     ElasticsearchService,
     ElasticsearchIndexManager,
     QDrantCollection,
     ESCollection,
+    CeleryTaskStatus,
+    ImportType,
     get_or_create,
     get_qdrant_client,
 )
-from .category import CategoryService
+from .category import CategoryService, SyncCategoryService
 from .product import (
     sync_with_product,
     autocomplete_products,

@@ -992,3 +992,17 @@ async def upload_products_csv_v3(
 
     finally:
         os.remove(temp_path)
+
+
+from app.tasks import test_import_products
+
+
+@router.post("/product/v1/bulk-upload/")
+async def upload_products():
+    task = test_import_products.delay("products.csv")
+
+    return {
+        "message": "Import started",
+        "task_id": task.id
+    }
+
