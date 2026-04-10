@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case, cast, String, and_
@@ -10,37 +9,39 @@ from app.models import ProductSearchResult
 router = APIRouter()
 
 
+# -----------------------------
+# CONVERT DATE → FULL DAY RANGE
+# -----------------------------
+def get_day_range(date: datetime):
+    start = datetime(date.year, date.month, date.day, 0, 0, 0)
+    end = start + timedelta(days=1)
+    return start, end
+
+
 @router.get("/dashboard/product/search-keywords/")
 async def product_search_dashboard(
     db: AsyncSession = Depends(get_session),
-    range: str = Query("all", enum=["all", "day", "week", "month"]),
+    start_date: datetime | None = Query(None),
+    end_date: datetime | None = Query(None),
 ):
-    now = datetime.utcnow()
-
     # -----------------------------
-    # DATE RANGE
-    # -----------------------------
-    start_date = None
-
-    if range == "day":
-        start_date = now - timedelta(days=1)
-    elif range == "week":
-        start_date = now - timedelta(days=7)
-    elif range == "month":
-        start_date = now - timedelta(days=30)
-
-    # -----------------------------
-    # FIXED FILTER LOGIC (IMPORTANT)
+    # BASE CONDITIONS
     # -----------------------------
     base_conditions = [ProductSearchResult.is_active == True]
 
-    if start_date is not None:
+    # convert DATE → FULL DAY RANGE
+    if start_date:
+        start_date, _ = get_day_range(start_date)
         base_conditions.append(ProductSearchResult.created_at >= start_date)
+
+    if end_date:
+        _, end_date = get_day_range(end_date)
+        base_conditions.append(ProductSearchResult.created_at < end_date)
 
     base_filter = and_(*base_conditions)
 
     # -----------------------------
-    # KEY FIELDS
+    # KEY FIELD
     # -----------------------------
     keyword_col = func.lower(cast(ProductSearchResult.query["q"], String))
 
@@ -94,7 +95,8 @@ async def product_search_dashboard(
     # RESPONSE
     # -----------------------------
     return {
-        "range": range,
+        "start_date": start_date,
+        "end_date": end_date,
         "total_searches": row.total_searches,
         "unique_searches": row.unique_searches,
         "zero_result_searches": row.zero_result_searches,

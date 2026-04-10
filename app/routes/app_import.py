@@ -179,6 +179,7 @@ async def get_import_list(
             "meta_data": imp.meta_data,
             "result": imp.result,
             "error": imp.error,
+            "created_at": imp.created_at,
             "completed_at": imp.completed_at,
         }
         for imp in imports
