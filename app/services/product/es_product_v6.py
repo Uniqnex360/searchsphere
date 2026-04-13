@@ -573,6 +573,51 @@ async def create_or_get_index_v6(es: Elasticsearch, index_name: str, index_type:
 #     }
 
 
+def add_sort(es_sort, field, sort_order):
+    # 1. Primary Sort: Push null/empty values to the bottom
+    # We return 0 for valid data and 1 for empty data.
+    # When sorting ASC, 0 (valid) comes first. When DESC, we still want valid first,
+    # so we logic this specifically.
+    es_sort.append(
+        {
+            "_script": {
+                "type": "number",
+                "order": "asc",  # Always 'asc' so 0 (valid) comes before 1 (empty)
+                "script": {
+                    "lang": "painless",
+                    "source": """
+                    if (!doc.containsKey(params.f) || doc[params.f].empty || doc[params.f].value == null || doc[params.f].value == '') {
+                        return 1;
+                    }
+                    return 0;
+                """,
+                    "params": {"f": f"{field}.keyword"},
+                },
+            }
+        }
+    )
+
+    # 2. Secondary Sort: Case-insensitive alphabetical sort
+    es_sort.append(
+        {
+            "_script": {
+                "type": "string",
+                "order": sort_order,
+                "script": {
+                    "lang": "painless",
+                    "source": """
+                    if (!doc.containsKey(params.f) || doc[params.f].empty) {
+                        return "";
+                    }
+                    return doc[params.f].value.toLowerCase();
+                """,
+                    "params": {"f": f"{field}.keyword"},
+                },
+            }
+        }
+    )
+
+
 async def get_product_list_v6(
     es: Elasticsearch,
     query: str = None,
@@ -679,20 +724,46 @@ async def get_product_list_v6(
     # Sorting
     # -----------------------------
     es_sort = []
+
     if sort_by == "product_name":
         es_sort.append(
-            {"product_name.keyword": {"order": sort_order, "missing": "_last"}}
+            {
+                "product_name.keyword": {
+                    "order": sort_order,
+                    "missing": "_last",
+                }
+            }
         )
+
     elif sort_by == "base_price":
-        es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
+        es_sort.append(
+            {
+                "base_price": {
+                    "order": sort_order,
+                    "missing": "_last",
+                }
+            }
+        )
+
+    elif sort_by in ["brand", "category", "product_type"]:
+        add_sort(es_sort, sort_by, sort_order)
+
     else:
         es_sort.append({"_score": {"order": sort_order}})
+
+    MAX_RESULT_WINDOW = 10000
+    from_ = (page - 1) * size
+
+    if from_ >= MAX_RESULT_WINDOW:
+        import random
+
+        from_ = random.randint(0, MAX_RESULT_WINDOW - size)
 
     # -----------------------------
     # Final search body
     # -----------------------------
     body = {
-        "from": (page - 1) * size,
+        "from": from_,
         "size": size,
         "_source": [
             "product_name",
