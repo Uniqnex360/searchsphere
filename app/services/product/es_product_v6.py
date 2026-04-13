@@ -626,6 +626,16 @@ async def get_product_list_v6(
                 "should": [
                     {
                         "match": {
+                            "brand": {
+                                "query": query,
+                                "operator": "and",
+                                "fuzziness": "AUTO",
+                                "boost": 5,
+                            }
+                        }
+                    },
+                    {
+                        "match": {
                             "suggest": {
                                 "query": query,
                                 "operator": "and",
