@@ -7,7 +7,11 @@ from datetime import datetime
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert
+from elasticsearch import Elasticsearch
+from elasticsearch.helpers import streaming_bulk
 
+from app.es_client import get_es
+from app.services import ESCollection
 from app.database import get_sync_session
 from app.models import (
     Industry,
@@ -197,6 +201,265 @@ def handle_category(
     return category_cache
 
 
+
+def sync_product_suggest_data_es(
+    es: Elasticsearch,
+    products: list[Product],
+    autosuggest_index: str,
+    product_index: str,
+    batch_size: int = 30,
+) -> dict:
+
+
+    offset = 0
+    total_processed = 0
+    batch_number = 1
+
+    print("🚀 Starting sync...")
+
+    # ======================
+    # Bulk helper with retry
+    # ======================
+    def log_bulk(actions, index_name):
+        created = updated = failed = noop = 0
+        if not actions:
+            return created, updated, noop, failed
+
+        failed_actions = []
+
+        def generate():
+            for action in actions:
+                new_action = action.copy()
+                new_action["_index"] = index_name
+                yield new_action
+
+        for ok, item in streaming_bulk(es, generate()):
+            if not ok:
+                print("❌ Bulk item failed:", item)
+                failed += 1
+                failed_actions.append(item)
+                continue
+
+            op_type = list(item.keys())[0]
+            result = item[op_type].get("result")
+
+            if result == "created":
+                created += 1
+            elif result == "updated":
+                updated += 1
+            elif result == "noop":
+                noop += 1
+
+        # Retry failed actions once
+        if failed_actions:
+            print(f"🔄 Retrying {len(failed_actions)} failed actions...")
+            for ok, item in streaming_bulk(es, (i.copy() for i in failed_actions)):
+                if not ok:
+                    print("❌ Retry failed:", item)
+                    failed += 1
+                    continue
+
+                op_type = list(item.keys())[0]
+                result = item[op_type].get("result")
+
+                if result == "created":
+                    created += 1
+                elif result == "updated":
+                    updated += 1
+                elif result == "noop":
+                    noop += 1
+
+        return created, updated, noop, failed
+
+    # ======================
+    # MAIN LOOP (FROM INPUT LIST)
+    # ======================
+    total_batches = (len(products) + batch_size - 1) // batch_size
+
+    while offset < len(products):
+
+        print(f"\n📦 Fetching batch {batch_number}/{total_batches}")
+
+        batch_products = products[offset : offset + batch_size]
+
+        autosuggest_actions = []
+        product_actions = []
+
+        for product in batch_products:
+
+            brand = product.brand
+            if not brand:
+                continue
+
+            category = product.category
+            product_type_obj = product.product_type
+
+            attributes = product.attributes or []
+            features = product.features or []
+            images = product.images or []
+            videos = product.videos or []
+            documents = product.documents or []
+
+            # --------------------
+            # Product payload
+            # --------------------
+            data = {
+                "product_name": product.product_name or "",
+                "sku": product.sku or "",
+                "mpn": product.mpn or "",
+                "gtin": product.gtin or "",
+                "ean": product.ean or "",
+                "upc": product.upc or "",
+                "product_type": (
+                    product_type_obj.product_type if product_type_obj else ""
+                ),
+                "industry_name": (
+                    product.industry.industry_name if product.industry else ""
+                ),
+                "category_name": category.name if category else "",
+                "taxonomy": product.taxonomy or "",
+                "country_of_origin": product.country_of_origin or "",
+                "warranty": product.warranty or "",
+                "weight": product.weight or 0,
+                "length": product.length or 0,
+                "width": product.width or 0,
+                "height": product.height or 0,
+                "base_price": product.base_price or 0,
+                "sale_price": product.sale_price or 0,
+                "selling_price": product.selling_price or 0,
+                "special_price": product.special_price or 0,
+                "weight_unit": product.weight_unit or "",
+                "dimension_unit": product.dimension_unit or "",
+                "currency": product.currency or "",
+                "stock_status": product.stock_status or "",
+                "vendor_name": product.vendor_name or "",
+                "vendor_sku": product.vendor_sku or "",
+                "short_description": product.short_description or "",
+                "long_description": product.long_description or "",
+                "meta_title": product.meta_title or "",
+                "meta_description": product.meta_description or "",
+                "search_keywords": product.search_keywords or "",
+                "stock_qty": product.stock_qty or 0,
+                "features": [
+                    {"name": f.name or "", "value": f.value or ""} for f in features
+                ],
+                "attributes": [
+                    {
+                        "name": a.attribute_name or "",
+                        "value": a.attribute_value or "",
+                        "uom": a.attribute_uom or "",
+                    }
+                    for a in attributes
+                ],
+                "images": [{"name": i.name or "", "url": i.url or ""} for i in images],
+                "videos": [{"name": v.name or "", "url": v.url or ""} for v in videos],
+                "documents": [
+                    {"name": d.name or "", "url": d.url or ""} for d in documents
+                ],
+            }
+
+            # --------------------
+            # Suggestions payload (same logic)
+            # --------------------
+            brand_name = brand.brand_name or ""
+            category_name = category.name if category else ""
+            product_type_name = (
+                product_type_obj.product_type if product_type_obj else ""
+            )
+
+            new_entry = f"{brand_name} {category_name}".strip()
+            product_type_entry = (
+                f"{brand_name} {category_name} {product_type_name}".strip()
+            )
+
+            suggest_set = {
+                brand_name,
+                new_entry,
+                product_type_entry,
+                product.product_name or "",
+                product.mpn or "",
+                product.sku or "",
+            }
+
+            for attr in attributes:
+                full_entry = f"{brand_name} {category_name} {product_type_name} {attr.attribute_name or ''} {attr.attribute_value or ''}".strip()
+                suggest_set.add(full_entry)
+
+            # --------------------
+            # AUTOSUGGEST
+            # --------------------
+            autosuggest_actions.append(
+                {
+                    "_op_type": "update",
+                    "_id": brand.id,
+                    "script": {
+                        "source": """
+                            if (ctx._source.brand_category == null) {
+                                ctx._source.brand_category = params.new_entries;
+                            } else if (!(ctx._source.brand_category instanceof List)) {
+                                ctx._source.brand_category = [];
+                            }
+                            for (entry in params.new_entries) {
+                                if (!ctx._source.brand_category.contains(entry)) {
+                                    ctx._source.brand_category.add(entry);
+                                }
+                            }
+                        """,
+                        "params": {"new_entries": [new_entry]},
+                    },
+                    "upsert": {
+                        "brand_name": brand_name,
+                        "brand_category": [new_entry],
+                    },
+                }
+            )
+
+            # --------------------
+            # PRODUCT INDEX
+            # --------------------
+            product_actions.append(
+                {
+                    "_op_type": "index",
+                    "_id": product.id,
+                    "_source": {
+                        "brand": brand_name,
+                        "suggest": list(suggest_set),
+                        **data,
+                    },
+                }
+            )
+
+        # --------------------
+        # BULK EXECUTION
+        # --------------------
+        print(
+            f"Processing batch {batch_number} → "
+            f"Products: {len(product_actions)}, Autosuggest: {len(autosuggest_actions)}"
+        )
+
+        p_created, p_updated, p_noop, p_failed = log_bulk(
+            product_actions, product_index
+        )
+        a_created, a_updated, a_noop, a_failed = log_bulk(
+            autosuggest_actions, autosuggest_index
+        )
+
+        print(
+            f"Batch {batch_number} → PRODUCTS: C:{p_created} U:{p_updated} F:{p_failed}"
+        )
+        print(
+            f"Batch {batch_number} → AUTOSUGGEST: C:{a_created} U:{a_updated} F:{a_failed}"
+        )
+
+        total_processed += len(batch_products)
+        offset += batch_size
+        batch_number += 1
+
+    print(f"\n🎉 Sync completed! Total processed: {total_processed}")
+
+    return {"total_processed": total_processed}
+
+
 # =========================
 # CELERY TASK
 # =========================
@@ -210,6 +473,8 @@ def import_products_task(self, file_path: str, obj_id: int):
     start_total = time.perf_counter()
 
     obj = session.get(APPImport, obj_id)
+
+    es = get_es()
 
     try:
         batch_size = 200
@@ -452,6 +717,13 @@ def import_products_task(self, file_path: str, obj_id: int):
                 session.flush()
 
             session.commit()
+
+            sync_product_suggest_data_es(
+                es,
+                 [p for p, _ in products_for_bg_task],
+                ESCollection.PRODUCT_AUTO_SUGGEST_V7.value,
+                ESCollection.PRODUCT_V7.value,
+            )
 
             progress = int(((batch_idx + 1) / total_batches) * 100)
 
