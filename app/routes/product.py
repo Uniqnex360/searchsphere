@@ -24,6 +24,7 @@ from app.services import (
     sync_product_suggest_data_es_v6,
     get_product_list_v6,
     update_product_view_count,
+    increment_search_popularity,
 )
 from app.es_client import get_es
 from app.database import get_session
@@ -617,6 +618,13 @@ async def product_list_v6(
         data,
         request.headers.get("X-FE-URL", str(request.url)),
     )
+    if q:
+        product_ids = [item["id"] for item in data["results"]]
+
+        background_tasks.add_task(
+            increment_search_popularity, es, ESCollection.PRODUCT_V7.value, product_ids
+        )
+
     return {"total": len(data), "data": data}
 
 
