@@ -23,6 +23,7 @@ from app.services import (
     sync_products_to_es,
     sync_product_suggest_data_es_v6,
     get_product_list_v6,
+    update_product_view_count,
 )
 from app.es_client import get_es
 from app.database import get_session
@@ -115,7 +116,13 @@ async def get_product_filter_meta(db: AsyncSession = Depends(get_session)):
 
 
 @router.get("/product/detail/{id}/")
-async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
+async def get_product_detail(
+    id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_session),
+    es=Depends(get_es),
+):
+
     result = await db.execute(
         select(Product)
         .where(Product.id == id)
@@ -130,22 +137,26 @@ async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
             selectinload(Product.brand),
         )
     )
+
     product = result.scalar_one_or_none()
 
     if not product:
         return JSONResponse(
-            status_code=404, content={"success": False, "error": "Product not found"}
+            status_code=404,
+            content={"success": False, "error": "Product not found"},
         )
 
-    # Convert SQLAlchemy object to JSON-serializable dict
+    # -------------------------
+    # Serialize safely
+    # -------------------------
     product_data = jsonable_encoder(product)
 
-    # Convert related objects
-    product_data["images"] = [jsonable_encoder(img) for img in product.images]
-    product_data["features"] = [jsonable_encoder(f) for f in product.features]
-    product_data["attributes"] = [jsonable_encoder(a) for a in product.attributes]
-    product_data["videos"] = [jsonable_encoder(v) for v in product.videos]
-    product_data["documents"] = [jsonable_encoder(d) for d in product.documents]
+    product_data["images"] = [jsonable_encoder(i) for i in product.images]
+    product_data["features"] = [jsonable_encoder(i) for i in product.features]
+    product_data["attributes"] = [jsonable_encoder(i) for i in product.attributes]
+    product_data["videos"] = [jsonable_encoder(i) for i in product.videos]
+    product_data["documents"] = [jsonable_encoder(i) for i in product.documents]
+
     product_data["category"] = (
         jsonable_encoder(product.category) if product.category else None
     )
@@ -153,6 +164,20 @@ async def get_product_detail(id: int, db: AsyncSession = Depends(get_session)):
         jsonable_encoder(product.industry) if product.industry else None
     )
     product_data["brand"] = jsonable_encoder(product.brand) if product.brand else None
+
+    # -------------------------
+    # Background task
+    # -------------------------
+    background_tasks.add_task(
+        update_product_view_count,
+        es,
+        {
+            "brand": product.brand.brand_name if product.brand else None,
+            "sku": getattr(product, "sku", None),
+            "mpn": getattr(product, "mpn", None),
+            "product_name": product.product_name,
+        },
+    )
 
     return {"success": True, "data": product_data}
 
@@ -414,8 +439,10 @@ async def get_product_search_keywords_list(
     order = request.query_params.get("order", "desc").lower()
     search_q = request.query_params.get("search")
 
+    # ✅ NEW PARAM (default = all)
+    result_type = request.query_params.get("result_type", "all")
+
     # Keyword extraction from JSON field
-    # keyword_col = cast(ProductSearchResult.query["q"], String)
     keyword_col = func.lower(cast(ProductSearchResult.query["q"], String))
 
     # Base aggregate
@@ -435,6 +462,12 @@ async def get_product_search_keywords_list(
     if search_q:
         base_query = base_query.where(keyword_col.ilike(f"%{search_q}%"))
 
+    # ✅ APPLY ZERO / NON-ZERO FILTER
+    if result_type == "zero":
+        base_query = base_query.where(ProductSearchResult.total_result == 0)
+    elif result_type == "non_zero":
+        base_query = base_query.where(ProductSearchResult.total_result > 0)
+
     # Subquery for pagination and sorting
     subquery = base_query.subquery()
     cols = subquery.c
@@ -444,8 +477,15 @@ async def get_product_search_keywords_list(
         func.count().label("total_count"),
         func.count(func.distinct(keyword_col)).label("unique_count"),
     ).select_from(ProductSearchResult)
+
     if search_q:
         count_query = count_query.where(keyword_col.ilike(f"%{search_q}%"))
+
+    # ✅ APPLY SAME FILTER TO COUNT QUERY
+    if result_type == "zero":
+        count_query = count_query.where(ProductSearchResult.total_result == 0)
+    elif result_type == "non_zero":
+        count_query = count_query.where(ProductSearchResult.total_result > 0)
 
     count_result = await db.exec(count_query)
     count_data = count_result.one()
