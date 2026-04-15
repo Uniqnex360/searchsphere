@@ -755,7 +755,15 @@ async def get_product_list_v6(
 
     elif sort_by in ["brand", "category", "product_type"]:
         add_sort(es_sort, sort_by, sort_order)
-
+    elif sort_by == "view_popularity":
+        es_sort.append(
+            {
+                "view_count": {
+                    "order": sort_order,
+                    "missing": "_last",
+                }
+            }
+        )
     else:
         es_sort.append({"_score": {"order": sort_order}})
 
@@ -781,6 +789,7 @@ async def get_product_list_v6(
             "images.url",
             "product_type",
             "suggest",
+            "view_count",
         ],
         # "query": {"bool": {"must": [query_body]}},
         "query": query_body,
@@ -913,6 +922,7 @@ async def get_product_list_v6(
                 "brand": brand_name,
                 "product_type": product_type_name,
                 "category": category_name,
+                "view_count": source.get("view_count", 0),
                 "base_price": source.get("base_price"),
                 "images": [
                     i.get("url")
