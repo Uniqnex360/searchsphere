@@ -26,4 +26,5 @@ from .product import (
     sync_product_suggest_data_es_v6,
     get_product_list_v6,
     update_product_view_count,
+    increment_search_popularity,
 )

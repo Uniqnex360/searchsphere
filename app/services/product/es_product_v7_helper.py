@@ -82,3 +82,31 @@ async def update_product_view_count(
 
     except Exception as e:
         print("ES view count update failed:", str(e))
+
+
+def increment_search_popularity(
+    es: Elasticsearch,
+    index: str,
+    product_ids: list[str],
+):
+    if not product_ids:
+        return
+
+    actions = []
+
+    for pid in product_ids:
+        actions.append({"update": {"_index": index, "_id": pid}})
+        actions.append(
+            {
+                "script": {
+                    "source": """
+                    if (ctx._source.search_popularity == null) {
+                        ctx._source.search_popularity = 0;
+                    }
+                    ctx._source.search_popularity += 1;
+                """
+                }
+            }
+        )
+
+    es.bulk(body=actions)

@@ -764,6 +764,15 @@ async def get_product_list_v6(
                 }
             }
         )
+    elif sort_by == "search_popularity":
+        es_sort.append(
+            {
+                "search_popularity": {
+                    "order": sort_order,
+                    "missing": "_last",
+                }
+            }
+        )
     else:
         es_sort.append({"_score": {"order": sort_order}})
 
@@ -790,6 +799,7 @@ async def get_product_list_v6(
             "product_type",
             "suggest",
             "view_count",
+            "search_popularity",
         ],
         # "query": {"bool": {"must": [query_body]}},
         "query": query_body,
@@ -923,6 +933,7 @@ async def get_product_list_v6(
                 "product_type": product_type_name,
                 "category": category_name,
                 "view_count": source.get("view_count", 0),
+                "search_popularity": source.get("search_popularity", 0),
                 "base_price": source.get("base_price"),
                 "images": [
                     i.get("url")

@@ -12,4 +12,4 @@ from .es_product_v6 import (
     sync_product_suggest_data_es_v6,
     get_product_list_v6,
 )
-from .es_product_v7_helper import update_product_view_count
+from .es_product_v7_helper import update_product_view_count, increment_search_popularity
