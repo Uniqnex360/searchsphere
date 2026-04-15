@@ -657,47 +657,55 @@ async def get_product_list_v6(
     # Build query
     # -----------------------------
     if query:
-        # query_body = {
-        #     "bool": {
-        #         "should": [
-        #             {"term": {"suggest.keyword": query}},  # exact match
-        #             {"match_phrase_prefix": {"suggest": query}},  # prefix match
-        #         ],
-        #         "minimum_should_match": 1,
-        #     }
-        # }
         query_body = {
             "bool": {
                 "should": [
+                    # =========================
+                    # 1. EXACT MATCH (highest)
+                    # =========================
+                    {"term": {"suggest.keyword": {"value": query, "boost": 20}}},
+                    # =========================
+                    # 2. PRODUCT NAME EXACT / NEAR MATCH
+                    # =========================
+                    {"match_phrase": {"product_name": {"query": query, "boost": 12}}},
+                    # =========================
+                    # 3. SUGGEST PHRASE MATCH (main ranking driver)
+                    # =========================
+                    {"match_phrase": {"suggest": {"query": query, "boost": 10}}},
+                    # =========================
+                    # 4. AUTOCOMPLETE (prefix search-as-you-type style)
+                    # =========================
+                    {"match_phrase_prefix": {"suggest": {"query": query, "boost": 6}}},
+                    # =========================
+                    # 5. BRAND MATCH (important for ecommerce)
+                    # =========================
                     {
                         "match": {
-                            "brand": {
-                                "query": query,
-                                "operator": "and",
-                                "fuzziness": "AUTO",
-                                "boost": 5,
-                            }
+                            "brand": {"query": query, "operator": "and", "boost": 5}
                         }
                     },
+                    # =========================
+                    # 6. FUZZY (ONLY typo fallback)
+                    # =========================
                     {
-                        "match": {
-                            "suggest": {
-                                "query": query,
-                                "operator": "and",
-                                "fuzziness": "AUTO",
-                                "boost": 2,
-                            }
-                        }
-                    },
-                    {
-                        "match_phrase_prefix": {
-                            "suggest": {"query": query, "boost": 1.5}
+                        "multi_match": {
+                            "query": query,
+                            "fields": [
+                                "product_name^3",
+                                "brand^4",
+                                "suggest^2",
+                                "search_keywords",
+                            ],
+                            "fuzziness": "AUTO",
+                            "operator": "and",
+                            "boost": 2,
                         }
                     },
                 ],
                 "minimum_should_match": 1,
             }
         }
+
     else:
         query_body = {"match_all": {}}
 
