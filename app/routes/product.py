@@ -1,9 +1,10 @@
 from typing import Optional, List
+from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func, desc
 from sqlalchemy.orm import selectinload
-from sqlalchemy import select, func, desc, asc, cast, String, case
+from sqlalchemy import select, func, desc, asc, cast, String, case, and_
 from sqlalchemy.sql.sqltypes import String
 
 from fastapi import APIRouter, Depends, Query, BackgroundTasks, Request
@@ -432,6 +433,15 @@ async def sync_product_with_elastic_serch(
     return {"success": True}
 
 
+# -----------------------------
+# DATE RANGE HELPER
+# -----------------------------
+def get_day_range(date: datetime):
+    start = datetime(date.year, date.month, date.day)
+    end = start + timedelta(days=1) - timedelta(seconds=1)
+    return start, end
+
+
 @router.get("/product/search/keywords/")
 async def get_product_search_keywords_list(
     request: Request,
@@ -440,7 +450,8 @@ async def get_product_search_keywords_list(
     # -------------------------
     # Pagination
     # -------------------------
-    page, limit = get_pagination_params(request)
+    page = int(request.query_params.get("page", 1))
+    limit = int(request.query_params.get("limit", 50))
     offset = (page - 1) * limit
 
     # -------------------------
@@ -451,13 +462,29 @@ async def get_product_search_keywords_list(
     search_q = request.query_params.get("search")
     result_type = request.query_params.get("result_type", "all")
 
+    # 👉 NEW DATE FILTERS
+    start_date_str = request.query_params.get("start_date")
+    end_date_str = request.query_params.get("end_date")
+
+    date_filters = []
+
+    if start_date_str:
+        start_dt = datetime.fromisoformat(start_date_str)
+        start_dt, _ = get_day_range(start_dt)
+        date_filters.append(ProductSearchResult.created_at >= start_dt)
+
+    if end_date_str:
+        end_dt = datetime.fromisoformat(end_date_str)
+        _, end_dt = get_day_range(end_dt)
+        date_filters.append(ProductSearchResult.created_at <= end_dt)
+
     # -------------------------
     # Keyword extraction
     # -------------------------
     keyword_col = func.lower(cast(ProductSearchResult.query["q"], String))
 
     # =========================================================
-    # 1. BASE QUERY (USED FOR UNIQUE GROUPED DATA)
+    # 1. BASE QUERY (GROUPED)
     # =========================================================
     base_query = select(
         keyword_col.label("q"),
@@ -467,6 +494,10 @@ async def get_product_search_keywords_list(
         func.max(ProductSearchResult.url).label("url"),
     ).where(ProductSearchResult.is_active == True)
 
+    # 👉 Apply date filters
+    if date_filters:
+        base_query = base_query.where(and_(*date_filters))
+
     if search_q:
         base_query = base_query.where(keyword_col.ilike(f"%{search_q}%"))
 
@@ -475,23 +506,32 @@ async def get_product_search_keywords_list(
     elif result_type == "non_zero":
         base_query = base_query.where(ProductSearchResult.total_result > 0)
 
-    base_query = base_query.group_by(keyword_col, ProductSearchResult.total_result)
+    base_query = base_query.group_by(
+        keyword_col,
+        ProductSearchResult.total_result,
+    )
 
     subquery = base_query.subquery()
     cols = subquery.c
 
     # =========================================================
-    # 2. UNIQUE COUNT (GROUPED RESULT COUNT)
+    # 2. UNIQUE COUNT
     # =========================================================
     unique_count_query = select(func.count()).select_from(subquery)
     unique_count = (await db.exec(unique_count_query)).scalar()
 
     # =========================================================
-    # 3. TOTAL COUNT (RAW TABLE COUNT - AS YOU WANTED)
+    # 3. TOTAL COUNT (RAW)
     # =========================================================
-    total_count_query = select(func.count()).select_from(ProductSearchResult).where(
-        ProductSearchResult.is_active == True
+    total_count_query = (
+        select(func.count())
+        .select_from(ProductSearchResult)
+        .where(ProductSearchResult.is_active == True)
     )
+
+    # 👉 Apply date filters
+    if date_filters:
+        total_count_query = total_count_query.where(and_(*date_filters))
 
     if search_q:
         total_count_query = total_count_query.where(keyword_col.ilike(f"%{search_q}%"))
@@ -534,7 +574,7 @@ async def get_product_search_keywords_list(
         )
 
     # =========================================================
-    # 5. DATA QUERY (GROUPED)
+    # 5. DATA QUERY
     # =========================================================
     final_query = (
         select(
@@ -570,10 +610,8 @@ async def get_product_search_keywords_list(
         "meta": {
             "page": page,
             "limit": limit,
-            # RAW TOTAL (AS YOU WANTED)
-            "total": total_count,
-            # GROUPED UNIQUE
-            "unique": unique_count,
+            "total": total_count,  # raw count
+            "unique": unique_count,  # grouped count
             "pages": (unique_count + limit - 1) // limit,
         },
     }
