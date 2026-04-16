@@ -2,9 +2,12 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case, cast, String, and_
+from elasticsearch import Elasticsearch
 
 from app.database import get_session
-from app.models import ProductSearchResult
+from app.es_client import get_es
+from app.models import ProductSearchResult, Product
+from app.services import ESCollection
 
 router = APIRouter()
 
@@ -24,6 +27,7 @@ def get_day_range(date: datetime):
 @router.get("/dashboard/product/search-keywords/")
 async def product_search_dashboard(
     db: AsyncSession = Depends(get_session),
+    es: Elasticsearch = Depends(get_es),
     start_date: datetime | None = Query(None),
     end_date: datetime | None = Query(None),
 ):
@@ -32,7 +36,6 @@ async def product_search_dashboard(
     # 1. SAFE BASE FILTER (IMPORTANT FIX)
     # =========================================================
     conditions = [ProductSearchResult.is_active == True]
-
 
     if start_date:
         start_date, _ = get_day_range(start_date)
@@ -53,6 +56,28 @@ async def product_search_dashboard(
     # 3. RAW TOTAL SEARCHES (FIXED = ALWAYS MATCHES TABLE)
     # =========================================================
     total_searches = (await db.exec(select(func.count()).where(base_filter))).scalar()
+
+    # =========================================================
+    # 3.1 TOTAL PRODUCTS (NEW)
+    # =========================================================
+    query = select(func.count()).select_from(Product)
+
+    if start_date:
+        query = query.where(Product.created_at >= start_date)
+
+    if end_date:
+        query = query.where(Product.created_at < end_date)
+
+    total_products = (await db.exec(query)).scalar()
+
+    # =========================================================
+    # 3.2 TOTAL ELASTICSEARCH DOCS (NEW)
+    # =========================================================
+    try:
+        es_count_resp = es.count(index=ESCollection.PRODUCT_V7.value)
+        total_es_docs = es_count_resp.get("count", 0)
+    except Exception:
+        total_es_docs = 0
 
     # =========================================================
     # 4. UNIQUE SEARCHES (GROUPED LOGIC)
@@ -141,8 +166,8 @@ async def product_search_dashboard(
     # FINAL RESPONSE
     # =========================================================
     return {
-        "total_searches": total_searches,  # ✅ RAW TABLE COUNT (FIXED)
-        "unique_searches": unique_searches,  # ✅ GROUPED
+        "total_searches": total_searches,
+        "unique_searches": unique_searches,
         "zero_result_searches": zero_result_searches,
         "successful_searches": successful_searches,
         "avg_results_per_search": float(avg_results),
@@ -153,4 +178,7 @@ async def product_search_dashboard(
             "q": top_keyword.q if top_keyword else None,
             "count": top_keyword.count if top_keyword else 0,
         },
+        # ✅ NEW FIELDS ADDED (ONLY THESE TWO)
+        "total_products": total_products,
+        "total_es_docs": total_es_docs,
     }
