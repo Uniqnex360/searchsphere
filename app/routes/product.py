@@ -116,6 +116,9 @@ async def get_product_filter_meta(db: AsyncSession = Depends(get_session)):
     return {"brands": brands, "categories": categories, "price_ranges": price_ranges}
 
 
+import time
+
+
 @router.get("/product/detail/{id}/")
 async def get_product_detail(
     id: int,
@@ -124,6 +127,7 @@ async def get_product_detail(
     es=Depends(get_es),
 ):
 
+    db_time = time.time()
     result = await db.execute(
         select(Product)
         .where(Product.id == id)
@@ -138,6 +142,8 @@ async def get_product_detail(
             selectinload(Product.brand),
         )
     )
+
+    print("db time", time.time() - db_time)
 
     product = result.scalar_one_or_none()
 
@@ -431,84 +437,95 @@ async def get_product_search_keywords_list(
     request: Request,
     db: AsyncSession = Depends(get_session),
 ):
+    # -------------------------
     # Pagination
+    # -------------------------
     page, limit = get_pagination_params(request)
     offset = (page - 1) * limit
 
-    # Sorting & search params
+    # -------------------------
+    # Filters
+    # -------------------------
     sort_by = request.query_params.get("sort_by", "created_at")
     order = request.query_params.get("order", "desc").lower()
     search_q = request.query_params.get("search")
-
-    # ✅ NEW PARAM (default = all)
     result_type = request.query_params.get("result_type", "all")
 
-    # Keyword extraction from JSON field
+    # -------------------------
+    # Keyword extraction
+    # -------------------------
     keyword_col = func.lower(cast(ProductSearchResult.query["q"], String))
 
-    # Base aggregate
-    base_query = (
-        select(
-            keyword_col.label("q"),
-            ProductSearchResult.total_result,
-            func.count().label("search_count"),
-            func.max(ProductSearchResult.created_at).label("created_at"),
-            func.max(ProductSearchResult.url).label("url"),
-        )
-        .where(ProductSearchResult.is_active == True)
-        .group_by(keyword_col, ProductSearchResult.total_result)
-    )
+    # =========================================================
+    # 1. BASE QUERY (USED FOR UNIQUE GROUPED DATA)
+    # =========================================================
+    base_query = select(
+        keyword_col.label("q"),
+        ProductSearchResult.total_result.label("total_result"),
+        func.count().label("search_count"),
+        func.max(ProductSearchResult.created_at).label("created_at"),
+        func.max(ProductSearchResult.url).label("url"),
+    ).where(ProductSearchResult.is_active == True)
 
-    # Apply search filter
     if search_q:
         base_query = base_query.where(keyword_col.ilike(f"%{search_q}%"))
 
-    # ✅ APPLY ZERO / NON-ZERO FILTER
     if result_type == "zero":
         base_query = base_query.where(ProductSearchResult.total_result == 0)
     elif result_type == "non_zero":
         base_query = base_query.where(ProductSearchResult.total_result > 0)
 
-    # Subquery for pagination and sorting
+    base_query = base_query.group_by(keyword_col, ProductSearchResult.total_result)
+
     subquery = base_query.subquery()
     cols = subquery.c
 
-    # Total and unique count for this search
-    count_query = select(
-        func.count().label("total_count"),
-        func.count(func.distinct(keyword_col)).label("unique_count"),
-    ).select_from(ProductSearchResult)
+    # =========================================================
+    # 2. UNIQUE COUNT (GROUPED RESULT COUNT)
+    # =========================================================
+    unique_count_query = select(func.count()).select_from(subquery)
+    unique_count = (await db.exec(unique_count_query)).scalar()
+
+    # =========================================================
+    # 3. TOTAL COUNT (RAW TABLE COUNT - AS YOU WANTED)
+    # =========================================================
+    total_count_query = select(func.count()).select_from(ProductSearchResult).where(
+        ProductSearchResult.is_active == True
+    )
 
     if search_q:
-        count_query = count_query.where(keyword_col.ilike(f"%{search_q}%"))
+        total_count_query = total_count_query.where(keyword_col.ilike(f"%{search_q}%"))
 
-    # ✅ APPLY SAME FILTER TO COUNT QUERY
     if result_type == "zero":
-        count_query = count_query.where(ProductSearchResult.total_result == 0)
+        total_count_query = total_count_query.where(
+            ProductSearchResult.total_result == 0
+        )
     elif result_type == "non_zero":
-        count_query = count_query.where(ProductSearchResult.total_result > 0)
+        total_count_query = total_count_query.where(
+            ProductSearchResult.total_result > 0
+        )
 
-    count_result = await db.exec(count_query)
-    count_data = count_result.one()
-    total_count = count_data.total_count
-    unique_count = count_data.unique_count
+    total_count = (await db.exec(total_count_query)).scalar()
 
-    # Sorting logic
+    # =========================================================
+    # 4. SORTING
+    # =========================================================
     sort_column_map = {
         "q": cols.q,
         "total_result": cols.total_result,
         "search_count": cols.search_count,
         "created_at": cols.created_at,
     }
+
     sort_column = sort_column_map.get(sort_by, cols.created_at)
 
-    order_expressions = []
     if sort_by == "q":
         empty_last = case((cols.q == "", 1), else_=0)
-        if order == "asc":
-            order_expressions = [empty_last.asc(), cols.q.asc()]
-        else:
-            order_expressions = [empty_last.asc(), cols.q.desc()]
+        order_expressions = (
+            [empty_last.asc(), cols.q.asc()]
+            if order == "asc"
+            else [empty_last.asc(), cols.q.desc()]
+        )
     else:
         order_expressions = (
             [asc(sort_column).nulls_last()]
@@ -516,7 +533,9 @@ async def get_product_search_keywords_list(
             else [desc(sort_column).nulls_last()]
         )
 
-    # Final paginated query
+    # =========================================================
+    # 5. DATA QUERY (GROUPED)
+    # =========================================================
     final_query = (
         select(
             cols.q,
@@ -530,26 +549,30 @@ async def get_product_search_keywords_list(
         .limit(limit)
     )
 
-    result = await db.exec(final_query)
-    rows = result.all()
+    rows = (await db.exec(final_query)).all()
 
     data = [
         {
-            "q": row.q,
-            "total_result": row.total_result,
-            "url": row.url,
-            "search_count": row.search_count,
-            "created_at": row.created_at,
+            "q": r.q,
+            "total_result": r.total_result,
+            "url": r.url,
+            "search_count": r.search_count,
+            "created_at": r.created_at,
         }
-        for row in rows
+        for r in rows
     ]
 
+    # =========================================================
+    # RESPONSE
+    # =========================================================
     return {
         "data": data,
         "meta": {
             "page": page,
             "limit": limit,
+            # RAW TOTAL (AS YOU WANTED)
             "total": total_count,
+            # GROUPED UNIQUE
             "unique": unique_count,
             "pages": (unique_count + limit - 1) // limit,
         },

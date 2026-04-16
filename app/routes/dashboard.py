@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 # -----------------------------
-# CONVERT DATE → FULL DAY RANGE
+# DATE RANGE HELPER
 # -----------------------------
 def get_day_range(date: datetime):
     start = datetime(date.year, date.month, date.day, 0, 0, 0)
@@ -18,93 +18,137 @@ def get_day_range(date: datetime):
     return start, end
 
 
+# -----------------------------
+# DASHBOARD API (FIXED)
+# -----------------------------
 @router.get("/dashboard/product/search-keywords/")
 async def product_search_dashboard(
     db: AsyncSession = Depends(get_session),
     start_date: datetime | None = Query(None),
     end_date: datetime | None = Query(None),
 ):
-    # -----------------------------
-    # BASE CONDITIONS
-    # -----------------------------
-    base_conditions = [ProductSearchResult.is_active == True]
 
-    # convert DATE → FULL DAY RANGE
+    # =========================================================
+    # 1. SAFE BASE FILTER (IMPORTANT FIX)
+    # =========================================================
+    conditions = [ProductSearchResult.is_active == True]
+
+
     if start_date:
         start_date, _ = get_day_range(start_date)
-        base_conditions.append(ProductSearchResult.created_at >= start_date)
+        conditions.append(ProductSearchResult.created_at >= start_date)
 
     if end_date:
         _, end_date = get_day_range(end_date)
-        base_conditions.append(ProductSearchResult.created_at < end_date)
+        conditions.append(ProductSearchResult.created_at < end_date)
 
-    base_filter = and_(*base_conditions)
+    base_filter = and_(*conditions)
 
-    # -----------------------------
-    # KEY FIELD
-    # -----------------------------
+    # =========================================================
+    # 2. NORMALIZED KEYWORD COLUMN
+    # =========================================================
     keyword_col = func.lower(cast(ProductSearchResult.query["q"], String))
 
+    # =========================================================
+    # 3. RAW TOTAL SEARCHES (FIXED = ALWAYS MATCHES TABLE)
+    # =========================================================
+    total_searches = (await db.exec(select(func.count()).where(base_filter))).scalar()
+
+    # =========================================================
+    # 4. UNIQUE SEARCHES (GROUPED LOGIC)
+    # =========================================================
+    grouped_subquery = (
+        select(
+            keyword_col.label("q"),
+            ProductSearchResult.total_result.label("total_result"),
+        )
+        .where(base_filter)
+        .group_by(keyword_col, ProductSearchResult.total_result)
+        .subquery()
+    )
+
+    unique_searches = (
+        await db.exec(select(func.count()).select_from(grouped_subquery))
+    ).scalar()
+
+    # =========================================================
+    # 5. SUCCESS / FAILURE METRICS (RAW)
+    # =========================================================
     is_success = case((ProductSearchResult.total_result > 0, 1), else_=0)
+
     is_zero = case((ProductSearchResult.total_result == 0, 1), else_=0)
 
-    # -----------------------------
-    # MAIN QUERY
-    # -----------------------------
-    query = select(
-        func.count().label("total_searches"),
-        func.count(func.distinct(keyword_col)).label("unique_searches"),
-        func.sum(is_zero).label("zero_result_searches"),
-        func.sum(is_success).label("successful_searches"),
-        func.avg(ProductSearchResult.total_result).label("avg_results"),
-        func.count(
-            func.distinct(case((ProductSearchResult.total_result > 0, keyword_col)))
-        ).label("unique_successful_keywords"),
-        func.count(
-            func.distinct(case((ProductSearchResult.total_result == 0, keyword_col)))
-        ).label("unique_failed_keywords"),
-    ).where(base_filter)
+    metrics = (
+        await db.exec(
+            select(
+                func.sum(is_zero).label("zero_result_searches"),
+                func.sum(is_success).label("successful_searches"),
+                func.avg(ProductSearchResult.total_result).label("avg_results"),
+            ).where(base_filter)
+        )
+    ).one()
 
-    result = await db.exec(query)
-    row = result.one()
+    zero_result_searches = metrics.zero_result_searches or 0
+    successful_searches = metrics.successful_searches or 0
+    avg_results = metrics.avg_results or 0
 
-    # -----------------------------
-    # FAILURE RATE
-    # -----------------------------
-    failure_rate = (
-        (row.zero_result_searches / row.total_searches * 100)
-        if row.total_searches
-        else 0
-    )
-
-    # -----------------------------
-    # TOP KEYWORD
-    # -----------------------------
-    top_keyword_query = (
-        select(keyword_col.label("q"), func.count().label("count"))
+    # =========================================================
+    # 6. UNIQUE SUCCESS / FAILURE KEYWORDS
+    # =========================================================
+    success_unique_query = (
+        select(keyword_col, ProductSearchResult.total_result)
         .where(base_filter)
-        .group_by(keyword_col)
-        .order_by(func.count().desc())
-        .limit(1)
+        .where(ProductSearchResult.total_result > 0)
+        .group_by(keyword_col, ProductSearchResult.total_result)
     )
 
-    top_keyword_result = await db.exec(top_keyword_query)
-    top_keyword = top_keyword_result.first()
+    failed_unique_query = (
+        select(keyword_col, ProductSearchResult.total_result)
+        .where(base_filter)
+        .where(ProductSearchResult.total_result == 0)
+        .group_by(keyword_col, ProductSearchResult.total_result)
+    )
 
-    # -----------------------------
-    # RESPONSE
-    # -----------------------------
+    unique_successful_keywords = (
+        await db.exec(select(func.count()).select_from(success_unique_query.subquery()))
+    ).scalar()
+
+    unique_failed_keywords = (
+        await db.exec(select(func.count()).select_from(failed_unique_query.subquery()))
+    ).scalar()
+
+    # =========================================================
+    # 7. FAILURE RATE
+    # =========================================================
+    failure_rate = (
+        (zero_result_searches / total_searches * 100) if total_searches else 0
+    )
+
+    # =========================================================
+    # 8. TOP KEYWORD
+    # =========================================================
+    top_keyword = (
+        await db.exec(
+            select(keyword_col.label("q"), func.count().label("count"))
+            .where(base_filter)
+            .group_by(keyword_col)
+            .order_by(func.count().desc())
+            .limit(1)
+        )
+    ).first()
+
+    # =========================================================
+    # FINAL RESPONSE
+    # =========================================================
     return {
-        "start_date": start_date,
-        "end_date": end_date,
-        "total_searches": row.total_searches,
-        "unique_searches": row.unique_searches,
-        "zero_result_searches": row.zero_result_searches,
-        "successful_searches": row.successful_searches,
-        "avg_results_per_search": float(row.avg_results or 0),
+        "total_searches": total_searches,  # ✅ RAW TABLE COUNT (FIXED)
+        "unique_searches": unique_searches,  # ✅ GROUPED
+        "zero_result_searches": zero_result_searches,
+        "successful_searches": successful_searches,
+        "avg_results_per_search": float(avg_results),
         "failure_rate_percent": round(failure_rate, 2),
-        "unique_successful_keywords": row.unique_successful_keywords,
-        "unique_failed_keywords": row.unique_failed_keywords,
+        "unique_successful_keywords": unique_successful_keywords,
+        "unique_failed_keywords": unique_failed_keywords,
         "top_keyword": {
             "q": top_keyword.q if top_keyword else None,
             "count": top_keyword.count if top_keyword else 0,
