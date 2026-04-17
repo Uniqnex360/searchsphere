@@ -783,6 +783,115 @@ async def product_list_v6(
 #     }
 
 
+# @router.get("/product/v6/auto-complete/")
+# async def get_product_auto_complete_v6(
+#     q: str = Query(..., min_length=1),
+#     size: int = 10,
+#     es: Elasticsearch = Depends(get_es),
+# ):
+#     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+#     q_clean = q.strip().lower()
+
+#     if not q_clean:
+#         return {"success": True, "query": q, "count": 0, "results": []}
+
+#     # split query into words for ranking
+#     q_words = q_clean.split()
+
+#     # Elasticsearch query using search_as_you_type fields
+#     es_query = {
+#         "size": 200,
+#         "_source": [
+#             "brand_name",
+#             "brand_category",
+#             "brand_category_product_type",
+#             "brand_category_product_type_attribute",
+#         ],
+#         "query": {
+#             "multi_match": {
+#                 "query": q,
+#                 "type": "bool_prefix",
+#                 "fields": [
+#                     "brand_name.autocomplete",
+#                     "brand_category.autocomplete",
+#                     "brand_category_product_type.autocomplete",
+#                     "brand_category_product_type_attribute.keyword",
+#                 ],
+#             }
+#         },
+#     }
+
+#     try:
+#         response = es.search(index=index_name, body=es_query)
+#     except Exception as e:
+#         return {
+#             "success": False,
+#             "error": str(e),
+#             "query": q,
+#             "count": 0,
+#             "results": [],
+#         }
+
+#     hits = response.get("hits", {}).get("hits", [])
+#     suggestions = []
+#     seen = set()
+
+#     for hit in hits:
+#         source = hit.get("_source", {}) or {}
+#         score = hit.get("_score", 0) or 0
+#         all_strings = []
+
+#         # brand_name
+#         brand_name = (source.get("brand_name") or "").strip()
+#         if brand_name:
+#             all_strings.append(brand_name)
+
+#         # other fields safely
+#         for field in [
+#             "brand_category",
+#             "brand_category_product_type",
+#             "brand_category_product_type_attribute",
+#         ]:
+#             field_values = source.get(field) or []
+#             for entry in field_values:
+#                 if entry:
+#                     all_strings.append(entry.strip())
+
+#         # filtering + ranking
+#         for s in all_strings:
+#             s_lower = s.lower()
+
+#             # skip exact query duplicates
+#             if s_lower == q_clean:
+#                 continue
+
+#             # count matching words
+#             word_match_count = sum(1 for w in q_words if w in s_lower)
+
+#             if (word_match_count > 0 or score > 1) and s not in seen:
+#                 suggestions.append(
+#                     {"text": s, "score": score, "word_match": word_match_count}
+#                 )
+#                 seen.add(s)
+
+#             if len(suggestions) >= size * 3:
+#                 break
+
+#         if len(suggestions) >= size * 3:
+#             break
+
+#     # smart sorting: match words → ES score → alphabetical
+#     suggestions = sorted(
+#         suggestions,
+#         key=lambda x: (-x["word_match"], -x["score"], x["text"]),
+#     )
+
+#     # return top `size` results
+#     results = [{"text": s["text"]} for s in suggestions[:size]]
+
+#     return {"success": True, "query": q, "count": len(results), "results": results}
+
+
 @router.get("/product/v6/auto-complete/")
 async def get_product_auto_complete_v6(
     q: str = Query(..., min_length=1),
@@ -793,13 +902,20 @@ async def get_product_auto_complete_v6(
     q_clean = q.strip().lower()
 
     if not q_clean:
-        return {"success": True, "query": q, "count": 0, "results": []}
+        return {
+            "success": True,
+            "query": q,
+            "primary_results": [],
+            "fallback_results": [],
+            "fallback_type": None,
+        }
 
-    # split query into words for ranking
     q_words = q_clean.split()
 
-    # Elasticsearch query using search_as_you_type fields
-    es_query = {
+    # -----------------------------
+    # 🔹 PRIMARY QUERY
+    # -----------------------------
+    primary_query = {
         "size": 200,
         "_source": [
             "brand_name",
@@ -822,71 +938,165 @@ async def get_product_auto_complete_v6(
     }
 
     try:
-        response = es.search(index=index_name, body=es_query)
+        response = es.search(index=index_name, body=primary_query)
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
             "query": q,
-            "count": 0,
-            "results": [],
+            "primary_results": [],
+            "fallback_results": [],
+            "fallback_type": None,
         }
 
     hits = response.get("hits", {}).get("hits", [])
-    suggestions = []
-    seen = set()
 
-    for hit in hits:
-        source = hit.get("_source", {}) or {}
-        score = hit.get("_score", 0) or 0
-        all_strings = []
+    # -----------------------------
+    # 🔹 HELPER
+    # -----------------------------
+    def extract_suggestions(hits):
+        suggestions = []
+        seen = set()
 
-        # brand_name
-        brand_name = (source.get("brand_name") or "").strip()
-        if brand_name:
-            all_strings.append(brand_name)
+        for hit in hits:
+            source = hit.get("_source", {}) or {}
+            score = hit.get("_score", 0) or 0
 
-        # other fields safely
-        for field in [
-            "brand_category",
-            "brand_category_product_type",
-            "brand_category_product_type_attribute",
-        ]:
-            field_values = source.get(field) or []
-            for entry in field_values:
-                if entry:
-                    all_strings.append(entry.strip())
+            all_strings = []
 
-        # filtering + ranking
-        for s in all_strings:
-            s_lower = s.lower()
+            brand_name = (source.get("brand_name") or "").strip()
+            if brand_name:
+                all_strings.append(brand_name)
 
-            # skip exact query duplicates
-            if s_lower == q_clean:
-                continue
+            for field in [
+                "brand_category",
+                "brand_category_product_type",
+                "brand_category_product_type_attribute",
+            ]:
+                values = source.get(field) or []
+                for v in values:
+                    if v:
+                        all_strings.append(v.strip())
 
-            # count matching words
-            word_match_count = sum(1 for w in q_words if w in s_lower)
+            for s in all_strings:
+                s_lower = s.lower()
 
-            if (word_match_count > 0 or score > 1) and s not in seen:
-                suggestions.append(
-                    {"text": s, "score": score, "word_match": word_match_count}
-                )
-                seen.add(s)
+                if s_lower == q_clean:
+                    continue
+
+                word_match_count = sum(1 for w in q_words if w in s_lower)
+
+                if (word_match_count > 0 or score > 1) and s not in seen:
+                    suggestions.append(
+                        {
+                            "text": s,
+                            "score": score,
+                            "word_match": word_match_count,
+                        }
+                    )
+                    seen.add(s)
+
+                if len(suggestions) >= size * 3:
+                    break
 
             if len(suggestions) >= size * 3:
                 break
 
-        if len(suggestions) >= size * 3:
-            break
+        suggestions = sorted(
+            suggestions,
+            key=lambda x: (-x["word_match"], -x["score"], x["text"]),
+        )
 
-    # smart sorting: match words → ES score → alphabetical
-    suggestions = sorted(
-        suggestions,
-        key=lambda x: (-x["word_match"], -x["score"], x["text"]),
-    )
+        return [{"text": s["text"]} for s in suggestions[:size]]
 
-    # return top `size` results
-    results = [{"text": s["text"]} for s in suggestions[:size]]
+    # -----------------------------
+    # 🔹 PRIMARY RESULTS
+    # -----------------------------
+    primary_results = extract_suggestions(hits)
 
-    return {"success": True, "query": q, "count": len(results), "results": results}
+    fallback_results = []
+    fallback_type = None
+
+    # -----------------------------
+    # 🔥 FALLBACK 1 → FUZZY (TYPO FIX)
+    # -----------------------------
+    if not primary_results:
+
+        fuzzy_query = {
+            "size": 100,
+            "_source": ["brand_name", "brand_category"],
+            "query": {
+                "multi_match": {
+                    "query": q,
+                    "fields": [
+                        "brand_name",
+                        "brand_category",
+                        "brand_category_product_type",
+                    ],
+                    "fuzziness": "AUTO",
+                }
+            },
+        }
+
+        response = es.search(index=index_name, body=fuzzy_query)
+        hits = response.get("hits", {}).get("hits", [])
+        fallback_results = extract_suggestions(hits)
+
+        if fallback_results:
+            fallback_type = "did_you_mean"
+
+    # -----------------------------
+    # 🔥 FALLBACK 2 → PREFIX
+    # -----------------------------
+    if not fallback_results:
+
+        prefix_query = {
+            "size": 50,
+            "_source": ["brand_name"],
+            "query": {"prefix": {"brand_name": q_clean}},
+        }
+
+        response = es.search(index=index_name, body=prefix_query)
+        hits = response.get("hits", {}).get("hits", [])
+        fallback_results = extract_suggestions(hits)
+
+        if fallback_results:
+            fallback_type = "did_you_mean"
+
+    # -----------------------------
+    # 🔥 FALLBACK 3 → TOP BRANDS
+    # -----------------------------
+    if not fallback_results:
+
+        popular_query = {
+            "size": 8,
+            "_source": ["brand_name"],
+            "query": {"match_all": {}},
+        }
+
+        response = es.search(index=index_name, body=popular_query)
+        hits = response.get("hits", {}).get("hits", [])
+
+        fallback_results = []
+        seen = set()
+
+        for hit in hits:
+            brand = (hit.get("_source", {}).get("brand_name") or "").strip()
+            if brand and brand not in seen:
+                fallback_results.append({"text": brand})
+                seen.add(brand)
+
+        fallback_type = "top_brands"
+
+    # -----------------------------
+    # FINAL RESPONSE
+    # -----------------------------
+    return {
+        "success": True,
+        "query": q,
+        "primary_count": len(primary_results),
+        "fallback_count": len(fallback_results),
+        "fallback_type": fallback_type,
+        "primary_results": primary_results,
+        "fallback_results": fallback_results,
+    }
