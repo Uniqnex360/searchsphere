@@ -907,196 +907,161 @@ async def get_product_auto_complete_v6(
             "query": q,
             "primary_results": [],
             "fallback_results": [],
-            "fallback_type": None,
         }
 
     q_words = q_clean.split()
 
-    # -----------------------------
-    # 🔹 PRIMARY QUERY
-    # -----------------------------
-    primary_query = {
+    # ---------------------------------------------------------
+    # 🔹 1. OPTIMIZED SEARCH QUERY (Now using .autocomplete for attributes)
+    # ---------------------------------------------------------
+    search_query = {
         "size": 200,
-        "_source": [
-            "brand_name",
-            "brand_category",
-            "brand_category_product_type",
-            "brand_category_product_type_attribute",
-        ],
         "query": {
-            "multi_match": {
-                "query": q,
-                "type": "bool_prefix",
-                "fields": [
-                    "brand_name.autocomplete",
-                    "brand_category.autocomplete",
-                    "brand_category_product_type.autocomplete",
-                    "brand_category_product_type_attribute.keyword",
-                ],
+            "bool": {
+                "should": [
+                    {
+                        # TIER 1: Exact Prefix matching across all fields
+                        "multi_match": {
+                            "query": q_clean,
+                            "type": "bool_prefix",
+                            "fields": [
+                                "brand_category_product_type_attribute.autocomplete^25",  # NEW: Using autocomplete field
+                                "brand_category_product_type.autocomplete^15",
+                                "brand_category.autocomplete^10",
+                                "brand_name.autocomplete^5",
+                            ],
+                            "boost": 10,
+                        }
+                    },
+                    {
+                        # TIER 2: Fuzzy matching for typos
+                        "multi_match": {
+                            "query": q_clean,
+                            "fields": [
+                                "brand_category_product_type_attribute^10",
+                                "brand_category_product_type^5",
+                                "brand_name^10",
+                            ],
+                            "fuzziness": "AUTO",
+                            "prefix_length": 1,
+                        }
+                    },
+                ]
             }
         },
     }
 
     try:
-        response = es.search(index=index_name, body=primary_query)
+        response = es.search(index=index_name, body=search_query)
+        hits = response.get("hits", {}).get("hits", [])
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "query": q,
-            "primary_results": [],
-            "fallback_results": [],
-            "fallback_type": None,
-        }
+        return {"success": False, "error": str(e)}
 
-    hits = response.get("hits", {}).get("hits", [])
+    # ---------------------------------------------------------
+    # 🔹 2. THREE-TIER BUCKETING & FILTERING
+    # ---------------------------------------------------------
+    primary_results = []
+    did_you_mean_results = []
+    seen = set()
 
-    # -----------------------------
-    # 🔹 HELPER
-    # -----------------------------
-    def extract_suggestions(hits):
-        suggestions = []
-        seen = set()
+    # Core prefix logic to prevent unrelated results (e.g., Wire Brushes for Aluminam)
+    core_prefix = q_clean[:3]
 
-        for hit in hits:
-            source = hit.get("_source", {}) or {}
-            score = hit.get("_score", 0) or 0
+    for hit in hits:
+        source = hit.get("_source", {}) or {}
+        score = hit.get("_score", 0)
 
-            all_strings = []
+        # Field weights for internal sorting
+        fields = [
+            ("attr", source.get("brand_category_product_type_attribute"), 3),
+            ("type", source.get("brand_category_product_type"), 2),
+            ("cat", source.get("brand_category"), 2),
+            ("brand", source.get("brand_name"), 1),
+        ]
 
-            brand_name = (source.get("brand_name") or "").strip()
-            if brand_name:
-                all_strings.append(brand_name)
+        for f_type, values, priority in fields:
+            if not values:
+                continue
+            if isinstance(values, str):
+                values = [values]
 
-            for field in [
-                "brand_category",
-                "brand_category_product_type",
-                "brand_category_product_type_attribute",
-            ]:
-                values = source.get(field) or []
-                for v in values:
-                    if v:
-                        all_strings.append(v.strip())
-
-            for s in all_strings:
-                s_lower = s.lower()
-
-                if s_lower == q_clean:
+            for v in values:
+                v_val = v.strip()
+                v_lower = v_val.lower()
+                if v_val in seen:
                     continue
 
-                word_match_count = sum(1 for w in q_words if w in s_lower)
+                # CHECK 1: Is it an exact word-for-word match? (Primary Bucket)
+                # If 'aluminum' is in the text, it goes to primary.
+                is_exact = all(word in v_lower for word in q_words)
 
-                if (word_match_count > 0 or score > 1) and s not in seen:
-                    suggestions.append(
-                        {
-                            "text": s,
-                            "score": score,
-                            "word_match": word_match_count,
-                        }
+                # CHECK 2: Relevance Filter
+                # We allow fuzzy matches if it's a Brand (like Pferd)
+                # OR if it contains the core prefix (Alu)
+                is_brand = f_type == "brand"
+                has_prefix = core_prefix in v_lower
+
+                if is_exact:
+                    primary_results.append(
+                        {"text": v_val, "score": score, "priority": priority}
                     )
-                    seen.add(s)
+                    seen.add(v_val)
+                elif score > 7.0 and (is_brand or has_prefix):
+                    did_you_mean_results.append(
+                        {"text": v_val, "score": score, "priority": priority}
+                    )
+                    seen.add(v_val)
 
-                if len(suggestions) >= size * 3:
-                    break
+    # Sort results: Attribute (3) > Type/Cat (2) > Brand (1)
+    primary_results.sort(key=lambda x: (-x["priority"], -x["score"]))
+    did_you_mean_results.sort(key=lambda x: (-x["priority"], -x["score"]))
 
-            if len(suggestions) >= size * 3:
-                break
-
-        suggestions = sorted(
-            suggestions,
-            key=lambda x: (-x["word_match"], -x["score"], x["text"]),
-        )
-
-        return [{"text": s["text"]} for s in suggestions[:size]]
-
-    # -----------------------------
-    # 🔹 PRIMARY RESULTS
-    # -----------------------------
-    primary_results = extract_suggestions(hits)
-
-    fallback_results = []
+    # ---------------------------------------------------------
+    # 🔹 3. RESPONSE ASSEMBLY
+    # ---------------------------------------------------------
+    final_primary = [{"text": x["text"]} for x in primary_results[:size]]
+    final_fallback = []
     fallback_type = None
 
-    # -----------------------------
-    # 🔥 FALLBACK 1 → FUZZY (TYPO FIX)
-    # -----------------------------
-    if not primary_results:
+    if final_primary:
+        # If primary results exist but don't fill the size, fill with fuzzy/DYM
+        if len(final_primary) < size:
+            remaining = size - len(final_primary)
+            final_primary.extend(
+                [{"text": x["text"]} for x in did_you_mean_results[:remaining]]
+            )
 
-        fuzzy_query = {
-            "size": 100,
-            "_source": ["brand_name", "brand_category"],
-            "query": {
-                "multi_match": {
-                    "query": q,
-                    "fields": [
-                        "brand_name",
-                        "brand_category",
-                        "brand_category_product_type",
-                    ],
-                    "fuzziness": "AUTO",
-                }
-            },
-        }
+    elif did_you_mean_results:
+        # No exact matches found, show fuzzy matches as Did You Mean
+        final_fallback = [{"text": x["text"]} for x in did_you_mean_results[:size]]
+        fallback_type = "did_you_mean"
 
-        response = es.search(index=index_name, body=fuzzy_query)
-        hits = response.get("hits", {}).get("hits", [])
-        fallback_results = extract_suggestions(hits)
-
-        if fallback_results:
-            fallback_type = "did_you_mean"
-
-    # -----------------------------
-    # 🔥 FALLBACK 2 → PREFIX
-    # -----------------------------
-    if not fallback_results:
-
-        prefix_query = {
-            "size": 50,
-            "_source": ["brand_name"],
-            "query": {"prefix": {"brand_name": q_clean}},
-        }
-
-        response = es.search(index=index_name, body=prefix_query)
-        hits = response.get("hits", {}).get("hits", [])
-        fallback_results = extract_suggestions(hits)
-
-        if fallback_results:
-            fallback_type = "did_you_mean"
-
-    # -----------------------------
-    # 🔥 FALLBACK 3 → TOP BRANDS
-    # -----------------------------
-    if not fallback_results:
-
+    else:
+        # Absolute Fallback: Popular Brands
         popular_query = {
-            "size": 8,
+            "size": 25,
             "_source": ["brand_name"],
             "query": {"match_all": {}},
         }
+        try:
+            pop_res = es.search(index=index_name, body=popular_query)
+            pop_hits = pop_res.get("hits", {}).get("hits", [])
+            seen_brands = set()
+            for h in pop_hits:
+                brand = (h["_source"].get("brand_name") or "").strip()
+                if brand and brand not in seen_brands:
+                    final_fallback.append({"text": brand})
+                    seen_brands.add(brand)
+                if len(final_fallback) >= 8:
+                    break
+            fallback_type = "top_brands"
+        except:
+            pass
 
-        response = es.search(index=index_name, body=popular_query)
-        hits = response.get("hits", {}).get("hits", [])
-
-        fallback_results = []
-        seen = set()
-
-        for hit in hits:
-            brand = (hit.get("_source", {}).get("brand_name") or "").strip()
-            if brand and brand not in seen:
-                fallback_results.append({"text": brand})
-                seen.add(brand)
-
-        fallback_type = "top_brands"
-
-    # -----------------------------
-    # FINAL RESPONSE
-    # -----------------------------
     return {
         "success": True,
         "query": q,
-        "primary_count": len(primary_results),
-        "fallback_count": len(fallback_results),
+        "primary_results": final_primary,
+        "fallback_results": final_fallback,
         "fallback_type": fallback_type,
-        "primary_results": primary_results,
-        "fallback_results": fallback_results,
     }
