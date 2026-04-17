@@ -316,6 +316,7 @@ def sync_product_suggest_data_es(
                 "industry_name": (
                     product.industry.industry_name if product.industry else ""
                 ),
+                "category": category.name if category else "",
                 "category_name": category.name if category else "",
                 "taxonomy": product.taxonomy or "",
                 "country_of_origin": product.country_of_origin or "",

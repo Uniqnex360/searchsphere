@@ -618,6 +618,46 @@ def add_sort(es_sort, field, sort_order):
     )
 
 
+def add_sort(es_sort, field, sort_order):
+    es_sort.append(
+        {
+            "_script": {
+                "type": "number",
+                "order": "asc",
+                "script": {
+                    "lang": "painless",
+                    "source": """
+                    if (!doc.containsKey(params.f) || doc[params.f].empty || doc[params.f].value == null || doc[params.f].value == '') {
+                        return 1;
+                    }
+                    return 0;
+                """,
+                    "params": {"f": f"{field}.keyword"},
+                },
+            }
+        }
+    )
+
+    es_sort.append(
+        {
+            "_script": {
+                "type": "string",
+                "order": sort_order,
+                "script": {
+                    "lang": "painless",
+                    "source": """
+                    if (!doc.containsKey(params.f) || doc[params.f].empty) {
+                        return "";
+                    }
+                    return doc[params.f].value.toLowerCase();
+                """,
+                    "params": {"f": f"{field}.keyword"},
+                },
+            }
+        }
+    )
+
+
 async def get_product_list_v6(
     es: Elasticsearch,
     query: str = None,
@@ -626,7 +666,7 @@ async def get_product_list_v6(
     category: Optional[List[str]] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
-    sort_by: str = "relevance",  # relevance | product_name | base_price
+    sort_by: str = "relevance",
     sort_order: str = "desc",
     page: int = 1,
     size: int = 50,
@@ -634,7 +674,31 @@ async def get_product_list_v6(
 ) -> Dict[str, Any]:
 
     # -----------------------------
-    # Build filters
+    # 🔥 SYNONYMS
+    # -----------------------------
+    SYNONYMS = {
+        "mobile": ["smartphone", "cellphone"],
+        "tv": ["television"],
+        "laptop": ["notebook"],
+        "shoe": ["shoes"],
+        "headphone": ["headphones"],
+        "arm cover": ["sleeve"],
+        "ss": ["stainless steel"],
+        "marking paints": ["water paints"],
+    }
+
+    def get_synonyms(q: str):
+        if not q:
+            return []
+        words = q.lower().split()
+        expanded = set()
+        for w in words:
+            if w in SYNONYMS:
+                expanded.update(SYNONYMS[w])
+        return list(expanded)
+
+    # -----------------------------
+    # Filters
     # -----------------------------
     filters = []
     if brand:
@@ -654,42 +718,20 @@ async def get_product_list_v6(
     print("🔹 Filters applied:", filters)
 
     # -----------------------------
-    # Build query
+    # Base Query (UNCHANGED)
     # -----------------------------
-    if query:
-        query_body = {
+    def build_query(q):
+        return {
             "bool": {
                 "should": [
-                    # =========================
-                    # 1. EXACT MATCH (highest)
-                    # =========================
-                    {"term": {"suggest.keyword": {"value": query, "boost": 20}}},
-                    # =========================
-                    # 2. PRODUCT NAME EXACT / NEAR MATCH
-                    # =========================
-                    {"match_phrase": {"product_name": {"query": query, "boost": 12}}},
-                    # =========================
-                    # 3. SUGGEST PHRASE MATCH (main ranking driver)
-                    # =========================
-                    {"match_phrase": {"suggest": {"query": query, "boost": 10}}},
-                    # =========================
-                    # 4. AUTOCOMPLETE (prefix search-as-you-type style)
-                    # =========================
-                    {"match_phrase_prefix": {"suggest": {"query": query, "boost": 6}}},
-                    # =========================
-                    # 5. BRAND MATCH (important for ecommerce)
-                    # =========================
-                    {
-                        "match": {
-                            "brand": {"query": query, "operator": "and", "boost": 5}
-                        }
-                    },
-                    # =========================
-                    # 6. FUZZY (ONLY typo fallback)
-                    # =========================
+                    {"term": {"suggest.keyword": {"value": q, "boost": 20}}},
+                    {"match_phrase": {"product_name": {"query": q, "boost": 12}}},
+                    {"match_phrase": {"suggest": {"query": q, "boost": 10}}},
+                    {"match_phrase_prefix": {"suggest": {"query": q, "boost": 6}}},
+                    {"match": {"brand": {"query": q, "operator": "and", "boost": 5}}},
                     {
                         "multi_match": {
-                            "query": query,
+                            "query": q,
                             "fields": [
                                 "product_name^3",
                                 "brand^4",
@@ -706,27 +748,36 @@ async def get_product_list_v6(
             }
         }
 
+    # -----------------------------
+    # Query with synonyms
+    # -----------------------------
+    if query:
+        main_query = build_query(query)
+        synonym_terms = get_synonyms(query)
+        synonym_queries = [build_query(s) for s in synonym_terms]
+
+        query_body = {
+            "bool": {
+                "should": [main_query, *synonym_queries],
+                "minimum_should_match": 1,
+            }
+        }
     else:
         query_body = {"match_all": {}}
 
     print("🔹 Query body:", query_body)
 
     # -----------------------------
-    # Total documents in the index (without filters)
+    # Counts
     # -----------------------------
     total_docs_resp = es.count(index=index)
     total_docs = total_docs_resp.get("count", 0)
-    print(f"🔹 Total documents in index: {total_docs}")
 
-    # -----------------------------
-    # Total after applying query + filters
-    # -----------------------------
     total_hits_resp = es.count(
         index=index,
         body={"query": {"bool": {"must": [query_body], "filter": filters}}},
     )
     total_hits = total_hits_resp.get("count", 0)
-    print(f"🔹 Total documents matching query + filters: {total_hits}")
 
     # -----------------------------
     # Sorting
@@ -735,44 +786,16 @@ async def get_product_list_v6(
 
     if sort_by == "product_name":
         es_sort.append(
-            {
-                "product_name.keyword": {
-                    "order": sort_order,
-                    "missing": "_last",
-                }
-            }
+            {"product_name.keyword": {"order": sort_order, "missing": "_last"}}
         )
-
     elif sort_by == "base_price":
-        es_sort.append(
-            {
-                "base_price": {
-                    "order": sort_order,
-                    "missing": "_last",
-                }
-            }
-        )
-
+        es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
     elif sort_by in ["brand", "category", "product_type"]:
         add_sort(es_sort, sort_by, sort_order)
     elif sort_by == "view_popularity":
-        es_sort.append(
-            {
-                "view_count": {
-                    "order": sort_order,
-                    "missing": "_last",
-                }
-            }
-        )
+        es_sort.append({"view_count": {"order": sort_order, "missing": "_last"}})
     elif sort_by == "search_popularity":
-        es_sort.append(
-            {
-                "search_popularity": {
-                    "order": sort_order,
-                    "missing": "_last",
-                }
-            }
-        )
+        es_sort.append({"search_popularity": {"order": sort_order, "missing": "_last"}})
     else:
         es_sort.append({"_score": {"order": sort_order}})
 
@@ -785,7 +808,7 @@ async def get_product_list_v6(
         from_ = random.randint(0, MAX_RESULT_WINDOW - size)
 
     # -----------------------------
-    # Final search body
+    # FINAL SEARCH BODY (FACETS ADDED)
     # -----------------------------
     body = {
         "from": from_,
@@ -801,10 +824,10 @@ async def get_product_list_v6(
             "view_count",
             "search_popularity",
         ],
-        # "query": {"bool": {"must": [query_body]}},
         "query": query_body,
         "post_filter": {"bool": {"must": filters}},
         "sort": es_sort,
+        # ✅ FACETS
         "aggs": {
             "brands": {
                 "filter": {
@@ -871,67 +894,53 @@ async def get_product_list_v6(
 
     print("🔹 Final search body prepared")
 
-    # -----------------------------
-    # Execute search
-    # -----------------------------
     resp = es.search(index=index, body=body)
     hits = resp.get("hits", {}).get("hits", [])
 
-    print(f"🔹 Number of hits returned in this page: {len(hits)}")
+    print(f"🔹 Number of hits: {len(hits)}")
 
     # -----------------------------
     # Extract facets
     # -----------------------------
     brand_list = [
-        bucket["key"]
-        for bucket in resp.get("aggregations", {})
+        b["key"]
+        for b in resp.get("aggregations", {})
         .get("brands", {})
         .get("values", {})
         .get("buckets", [])
     ]
+
     product_type_list = [
-        bucket["key"]
-        for bucket in resp.get("aggregations", {})
+        b["key"]
+        for b in resp.get("aggregations", {})
         .get("product_type", {})
         .get("values", {})
         .get("buckets", [])
     ]
+
     category_list = [
-        bucket["key"]
-        for bucket in resp.get("aggregations", {})
+        b["key"]
+        for b in resp.get("aggregations", {})
         .get("categories", {})
         .get("values", {})
         .get("buckets", [])
     ]
 
     # -----------------------------
-    # Format results with attributes included in suggest
+    # Results
     # -----------------------------
     results = []
     for hit in hits:
         source = hit["_source"]
-        suggest_set = set(source.get("suggest", []))
-
-        attributes = source.get("attributes", [])
-        brand_name = source.get("brand", "")
-        category_name = source.get("category", "")
-        product_type_name = source.get("product_type", "")
-
-        for attr in attributes:
-            attr_name = attr.get("name")
-            attr_value = attr.get("value")
-            if attr_name and attr_value:
-                attr_entry = f"{brand_name} {category_name} {product_type_name} {attr_name} {attr_value}"
-                suggest_set.add(attr_entry)
 
         results.append(
             {
                 "id": hit["_id"],
                 "score": hit["_score"],
                 "name": source.get("product_name"),
-                "brand": brand_name,
-                "product_type": product_type_name,
-                "category": category_name,
+                "brand": source.get("brand"),
+                "product_type": source.get("product_type"),
+                "category": source.get("category"),
                 "view_count": source.get("view_count", 0),
                 "search_popularity": source.get("search_popularity", 0),
                 "base_price": source.get("base_price"),
@@ -940,11 +949,9 @@ async def get_product_list_v6(
                     for i in source.get("images", [])
                     if isinstance(i, dict)
                 ],
-                "suggest": list(suggest_set),
+                "suggest": source.get("suggest", []),
             }
         )
-
-    print(f"🔹 Returning {len(results)} results for page {page}")
 
     return {
         "total": total_hits,
@@ -954,6 +961,7 @@ async def get_product_list_v6(
         "size": size,
         "total_pages": (total_hits + size - 1) // size,
         "results": results,
+        # ✅ FACETS RETURNED
         "facets": {
             "brands": brand_list,
             "categories": category_list,
