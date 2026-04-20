@@ -628,11 +628,6 @@ async def update_product_data_v6(
     return {}
 
 
-from fastapi import Request, Query, BackgroundTasks, Depends
-from typing import List, Optional, Dict
-from elasticsearch import Elasticsearch
-
-
 @router.get("/product/v6/list/")
 async def product_list_v6(
     request: Request,
