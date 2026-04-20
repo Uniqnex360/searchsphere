@@ -1,3 +1,4 @@
+import re
 from typing import Optional, List, Dict, Any
 from elasticsearch import Elasticsearch
 from sqlalchemy.orm import selectinload
@@ -698,7 +699,7 @@ async def get_product_list_v6(
         return list(expanded)
 
     # -----------------------------
-    # Filters
+    # FILTERS
     # -----------------------------
     filters = []
     if brand:
@@ -715,47 +716,98 @@ async def get_product_list_v6(
             price_range["lte"] = max_price
         filters.append({"range": {"base_price": price_range}})
 
-    print("🔹 Filters applied:", filters)
-
     # -----------------------------
-    # Base Query (UNCHANGED)
+    # BUILD QUERY (WITH REGEX FIX + TYPO HANDLING)
     # -----------------------------
     def build_query(q):
+        if not q:
+            return {"match_all": {}}
+
+        # Regex Fix: "1400rpm" -> "1400 rpm", "5kg" -> "5 kg"
+        q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q.lower().strip())
+
         return {
-            "bool": {
-                "should": [
-                    {"term": {"suggest.keyword": {"value": q, "boost": 20}}},
-                    {"match_phrase": {"product_name": {"query": q, "boost": 12}}},
-                    {"match_phrase": {"suggest": {"query": q, "boost": 10}}},
-                    {"match_phrase_prefix": {"suggest": {"query": q, "boost": 6}}},
-                    {"match": {"brand": {"query": q, "operator": "and", "boost": 5}}},
-                    {
-                        "multi_match": {
-                            "query": q,
-                            "fields": [
-                                "product_name^3",
-                                "brand^4",
-                                "suggest^2",
-                                "search_keywords",
-                            ],
-                            "fuzziness": "AUTO",
-                            "operator": "and",
-                            "boost": 2,
-                        }
-                    },
-                ],
-                "minimum_should_match": 1,
+            "function_score": {
+                "query": {
+                    "bool": {
+                        # SHIELD: Product must relate to the Brand or Type in the query
+                        "must": [
+                            {
+                                "multi_match": {
+                                    "query": q_expanded,
+                                    "fields": [
+                                        "brand^50",
+                                        "product_type^30",
+                                        "category^20",
+                                    ],
+                                    "operator": "or",
+                                    "minimum_should_match": 1,
+                                }
+                            }
+                        ],
+                        "should": [
+                            # PRIMARY MATCH (Technical specs now split)
+                            {
+                                "multi_match": {
+                                    "query": q_expanded,
+                                    "type": "cross_fields",
+                                    "fields": [
+                                        "attributes.value^100",
+                                        "product_name^50",
+                                        "features.value^20",
+                                    ],
+                                    "operator": "and",
+                                    "boost": 2000,
+                                }
+                            },
+                            # TYPO FIX (Fuzzy attributes)
+                            {
+                                "multi_match": {
+                                    "query": q_expanded,
+                                    "fields": ["attributes.value^80"],
+                                    "fuzziness": "AUTO",
+                                    "operator": "and",
+                                    "boost": 500,
+                                }
+                            },
+                            # -----------------------------
+                            # 🆕 TYPO HANDLING ADDED (NEW)
+                            # -----------------------------
+                            {
+                                "multi_match": {
+                                    "query": q_expanded,
+                                    "fields": [
+                                        "product_name^20",
+                                        "brand^60",
+                                        "product_type^60",
+                                        "category^40",
+                                    ],
+                                    "fuzziness": "AUTO",
+                                    "prefix_length": 1,
+                                    "operator": "and",
+                                    "boost": 300,
+                                }
+                            },
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                },
+                "boost_mode": "multiply",
+                "field_value_factor": {
+                    "field": "search_popularity",
+                    "modifier": "log1p",
+                    "missing": 1,
+                },
             }
         }
 
     # -----------------------------
-    # Query with synonyms
+    # EXECUTION PREP
     # -----------------------------
     if query:
         main_query = build_query(query)
         synonym_terms = get_synonyms(query)
         synonym_queries = [build_query(s) for s in synonym_terms]
-
         query_body = {
             "bool": {
                 "should": [main_query, *synonym_queries],
@@ -765,54 +817,32 @@ async def get_product_list_v6(
     else:
         query_body = {"match_all": {}}
 
-    print("🔹 Query body:", query_body)
+    # Pagination
+    from_ = (page - 1) * size
 
-    # -----------------------------
-    # Counts
-    # -----------------------------
-    total_docs_resp = es.count(index=index)
-    total_docs = total_docs_resp.get("count", 0)
-
-    total_hits_resp = es.count(
-        index=index,
-        body={"query": {"bool": {"must": [query_body], "filter": filters}}},
-    )
-    total_hits = total_hits_resp.get("count", 0)
-
-    # -----------------------------
     # Sorting
-    # -----------------------------
     es_sort = []
-
     if sort_by == "product_name":
         es_sort.append(
             {"product_name.keyword": {"order": sort_order, "missing": "_last"}}
         )
     elif sort_by == "base_price":
         es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
-    elif sort_by in ["brand", "category", "product_type"]:
-        add_sort(es_sort, sort_by, sort_order)
-    elif sort_by == "view_popularity":
-        es_sort.append({"view_count": {"order": sort_order, "missing": "_last"}})
     elif sort_by == "search_popularity":
         es_sort.append({"search_popularity": {"order": sort_order, "missing": "_last"}})
     else:
         es_sort.append({"_score": {"order": sort_order}})
 
-    MAX_RESULT_WINDOW = 10000
-    from_ = (page - 1) * size
-
-    if from_ >= MAX_RESULT_WINDOW:
-        import random
-
-        from_ = random.randint(0, MAX_RESULT_WINDOW - size)
-
     # -----------------------------
-    # FINAL SEARCH BODY (FACETS ADDED)
+    # FINAL SEARCH BODY (FACETS RESTORED)
     # -----------------------------
     body = {
         "from": from_,
         "size": size,
+        "query": query_body,
+        "post_filter": {"bool": {"must": filters}},
+        "track_total_hits": True,
+        "sort": es_sort,
         "_source": [
             "product_name",
             "brand",
@@ -824,19 +854,11 @@ async def get_product_list_v6(
             "view_count",
             "search_popularity",
         ],
-        "query": query_body,
-        "post_filter": {"bool": {"must": filters}},
-        "sort": es_sort,
-        # ✅ FACETS
         "aggs": {
             "brands": {
                 "filter": {
                     "bool": {
-                        "must": [
-                            f
-                            for f in filters
-                            if not f.get("terms", {}).get("brand.keyword")
-                        ]
+                        "must": [f for f in filters if "brand.keyword" not in str(f)]
                     }
                 },
                 "aggs": {
@@ -853,9 +875,7 @@ async def get_product_list_v6(
                 "filter": {
                     "bool": {
                         "must": [
-                            f
-                            for f in filters
-                            if not f.get("terms", {}).get("product_type.keyword")
+                            f for f in filters if "product_type.keyword" not in str(f)
                         ]
                     }
                 },
@@ -872,11 +892,7 @@ async def get_product_list_v6(
             "categories": {
                 "filter": {
                     "bool": {
-                        "must": [
-                            f
-                            for f in filters
-                            if not f.get("terms", {}).get("category.keyword")
-                        ]
+                        "must": [f for f in filters if "category.keyword" not in str(f)]
                     }
                 },
                 "aggs": {
@@ -892,47 +908,22 @@ async def get_product_list_v6(
         },
     }
 
-    print("🔹 Final search body prepared")
+    # -----------------------------
+    # COUNTS & SEARCH
+    # -----------------------------
+    total_docs = (es.count(index=index)).get("count", 0)
 
     resp = es.search(index=index, body=body)
+
     hits = resp.get("hits", {}).get("hits", [])
-
-    print(f"🔹 Number of hits: {len(hits)}")
-
-    # -----------------------------
-    # Extract facets
-    # -----------------------------
-    brand_list = [
-        b["key"]
-        for b in resp.get("aggregations", {})
-        .get("brands", {})
-        .get("values", {})
-        .get("buckets", [])
-    ]
-
-    product_type_list = [
-        b["key"]
-        for b in resp.get("aggregations", {})
-        .get("product_type", {})
-        .get("values", {})
-        .get("buckets", [])
-    ]
-
-    category_list = [
-        b["key"]
-        for b in resp.get("aggregations", {})
-        .get("categories", {})
-        .get("values", {})
-        .get("buckets", [])
-    ]
+    total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
 
     # -----------------------------
-    # Results
+    # DATA EXTRACTION
     # -----------------------------
     results = []
     for hit in hits:
         source = hit["_source"]
-
         results.append(
             {
                 "id": hit["_id"],
@@ -953,19 +944,27 @@ async def get_product_list_v6(
             }
         )
 
+    # Facet Extraction
+    def get_buckets(agg_name):
+        return [
+            b["key"]
+            for b in resp.get("aggregations", {})
+            .get(agg_name, {})
+            .get("values", {})
+            .get("buckets", [])
+        ]
+
     return {
-        "total": total_hits,
         "total_docs_after_filter": total_hits,
         "total_docs": total_docs,
         "page": page,
         "size": size,
-        "total_pages": (total_hits + size - 1) // size,
+        "total_pages": (total_hits + size - 1) // size if total_hits > 0 else 0,
         "results": results,
-        # ✅ FACETS RETURNED
         "facets": {
-            "brands": brand_list,
-            "categories": category_list,
-            "product_type": product_type_list,
+            "brands": get_buckets("brands"),
+            "categories": get_buckets("categories"),
+            "product_type": get_buckets("product_type"),
         },
     }
 
