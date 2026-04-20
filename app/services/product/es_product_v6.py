@@ -659,24 +659,35 @@ def add_sort(es_sort, field, sort_order):
     )
 
 
+import re
+from typing import Any, Dict, List, Optional
+from elasticsearch import Elasticsearch
+
+
 async def get_product_list_v6(
     es: Elasticsearch,
     query: str = None,
     brand: Optional[List[str]] = None,
     product_type: Optional[List[str]] = None,
     category: Optional[List[str]] = None,
+    attr_filters: Optional[Dict[str, List[str]]] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     sort_by: str = "relevance",
     sort_order: str = "desc",
     page: int = 1,
     size: int = 50,
-    index: str = ESCollection.PRODUCT_V7.value,
+    index: str = "product_v7",
 ) -> Dict[str, Any]:
 
-    # -----------------------------
-    # 🔥 SYNONYMS
-    # -----------------------------
+    ES_MAX_WINDOW = 10000
+    requested_from = (page - 1) * size
+
+    if (requested_from + size) > ES_MAX_WINDOW:
+        current_from = ES_MAX_WINDOW - size
+    else:
+        current_from = requested_from
+
     SYNONYMS = {
         "mobile": ["smartphone", "cellphone"],
         "tv": ["television"],
@@ -698,9 +709,23 @@ async def get_product_list_v6(
                 expanded.update(SYNONYMS[w])
         return list(expanded)
 
-    # -----------------------------
-    # FILTERS
-    # -----------------------------
+    runtime_mappings = {
+        "attr_pairs": {
+            "type": "keyword",
+            "script": {
+                "source": """
+                if (params['_source'].attributes != null) {
+                    for (item in params['_source'].attributes) {
+                        if (item.name != null && item.value != null && item.value != "") {
+                            emit(item.name + ":::" + item.value);
+                        }
+                    }
+                }
+                """
+            },
+        }
+    }
+
     filters = []
     if brand:
         filters.append({"terms": {"brand.keyword": brand}})
@@ -708,6 +733,12 @@ async def get_product_list_v6(
         filters.append({"terms": {"product_type.keyword": product_type}})
     if category:
         filters.append({"terms": {"category.keyword": category}})
+
+    if attr_filters:
+        for attr_name, values in attr_filters.items():
+            combined_pairs = [f"{attr_name}:::{v}" for v in values]
+            filters.append({"terms": {"attr_pairs": combined_pairs}})
+
     if min_price is not None or max_price is not None:
         price_range = {}
         if min_price is not None:
@@ -716,21 +747,16 @@ async def get_product_list_v6(
             price_range["lte"] = max_price
         filters.append({"range": {"base_price": price_range}})
 
-    # -----------------------------
-    # BUILD QUERY (WITH REGEX FIX + TYPO HANDLING)
-    # -----------------------------
     def build_query(q):
         if not q:
             return {"match_all": {}}
 
-        # Regex Fix: "1400rpm" -> "1400 rpm", "5kg" -> "5 kg"
         q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q.lower().strip())
 
         return {
             "function_score": {
                 "query": {
                     "bool": {
-                        # SHIELD: Product must relate to the Brand or Type in the query
                         "must": [
                             {
                                 "multi_match": {
@@ -739,6 +765,7 @@ async def get_product_list_v6(
                                         "brand^50",
                                         "product_type^30",
                                         "category^20",
+                                        "suggest^20",
                                     ],
                                     "operator": "or",
                                     "minimum_should_match": 1,
@@ -746,13 +773,45 @@ async def get_product_list_v6(
                             }
                         ],
                         "should": [
-                            # PRIMARY MATCH (Technical specs now split)
+                            # 🔥 Exact brand match (added)
+                            {
+                                "term": {
+                                    "brand.keyword": {
+                                        "value": q_expanded,
+                                        "boost": 10000,
+                                    }
+                                }
+                            },
+                            {
+                                "match_phrase": {
+                                    "brand": {"query": q_expanded, "boost": 5000}
+                                }
+                            },
+                            # 🔥 Suggest matching (added)
+                            {
+                                "term": {
+                                    "suggest.keyword": {
+                                        "value": q_expanded,
+                                        "boost": 8000,
+                                    }
+                                }
+                            },
+                            {
+                                "match": {
+                                    "suggest": {
+                                        "query": q_expanded,
+                                        "operator": "and",
+                                        "boost": 3000,
+                                    }
+                                }
+                            },
                             {
                                 "multi_match": {
                                     "query": q_expanded,
                                     "type": "cross_fields",
                                     "fields": [
-                                        "attributes.value^100",
+                                        "brand^100",
+                                        "attributes.value^50",
                                         "product_name^50",
                                         "features.value^20",
                                     ],
@@ -760,19 +819,15 @@ async def get_product_list_v6(
                                     "boost": 2000,
                                 }
                             },
-                            # TYPO FIX (Fuzzy attributes)
                             {
                                 "multi_match": {
                                     "query": q_expanded,
                                     "fields": ["attributes.value^80"],
-                                    "fuzziness": "AUTO",
+                                    "fuzziness": "AUTO:4,6",  # updated
                                     "operator": "and",
                                     "boost": 500,
                                 }
                             },
-                            # -----------------------------
-                            # 🆕 TYPO HANDLING ADDED (NEW)
-                            # -----------------------------
                             {
                                 "multi_match": {
                                     "query": q_expanded,
@@ -782,7 +837,7 @@ async def get_product_list_v6(
                                         "product_type^60",
                                         "category^40",
                                     ],
-                                    "fuzziness": "AUTO",
+                                    "fuzziness": "AUTO:4,6",  # updated
                                     "prefix_length": 1,
                                     "operator": "and",
                                     "boost": 300,
@@ -801,9 +856,6 @@ async def get_product_list_v6(
             }
         }
 
-    # -----------------------------
-    # EXECUTION PREP
-    # -----------------------------
     if query:
         main_query = build_query(query)
         synonym_terms = get_synonyms(query)
@@ -817,10 +869,6 @@ async def get_product_list_v6(
     else:
         query_body = {"match_all": {}}
 
-    # Pagination
-    from_ = (page - 1) * size
-
-    # Sorting
     es_sort = []
     if sort_by == "product_name":
         es_sort.append(
@@ -830,14 +878,14 @@ async def get_product_list_v6(
         es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
     elif sort_by == "search_popularity":
         es_sort.append({"search_popularity": {"order": sort_order, "missing": "_last"}})
+    elif sort_by == "category":
+        es_sort.append({"category.keyword": {"order": sort_order, "missing": "_last"}})
     else:
         es_sort.append({"_score": {"order": sort_order}})
 
-    # -----------------------------
-    # FINAL SEARCH BODY (FACETS RESTORED)
-    # -----------------------------
     body = {
-        "from": from_,
+        "runtime_mappings": runtime_mappings,
+        "from": current_from,
         "size": size,
         "query": query_body,
         "post_filter": {"bool": {"must": filters}},
@@ -905,22 +953,16 @@ async def get_product_list_v6(
                     }
                 },
             },
+            "dynamic_attributes": {"terms": {"field": "attr_pairs", "size": 2000}},
         },
     }
 
-    # -----------------------------
-    # COUNTS & SEARCH
-    # -----------------------------
     total_docs = (es.count(index=index)).get("count", 0)
-
     resp = es.search(index=index, body=body)
 
     hits = resp.get("hits", {}).get("hits", [])
     total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
 
-    # -----------------------------
-    # DATA EXTRACTION
-    # -----------------------------
     results = []
     for hit in hits:
         source = hit["_source"]
@@ -944,7 +986,6 @@ async def get_product_list_v6(
             }
         )
 
-    # Facet Extraction
     def get_buckets(agg_name):
         return [
             b["key"]
@@ -953,6 +994,17 @@ async def get_product_list_v6(
             .get("values", {})
             .get("buckets", [])
         ]
+
+    dynamic_facets = {}
+    attr_buckets = (
+        resp.get("aggregations", {}).get("dynamic_attributes", {}).get("buckets", [])
+    )
+    for b in attr_buckets:
+        if ":::" in b["key"]:
+            name, val = b["key"].split(":::", 1)
+            if name not in dynamic_facets:
+                dynamic_facets[name] = []
+            dynamic_facets[name].append(val)
 
     return {
         "total_docs_after_filter": total_hits,
@@ -965,6 +1017,7 @@ async def get_product_list_v6(
             "brands": get_buckets("brands"),
             "categories": get_buckets("categories"),
             "product_type": get_buckets("product_type"),
+            "dynamic_attributes": dynamic_facets,
         },
     }
 

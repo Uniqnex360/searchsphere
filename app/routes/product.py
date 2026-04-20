@@ -628,14 +628,21 @@ async def update_product_data_v6(
     return {}
 
 
+from fastapi import Request, Query, BackgroundTasks, Depends
+from typing import List, Optional, Dict
+from elasticsearch import Elasticsearch
+
+
 @router.get("/product/v6/list/")
 async def product_list_v6(
     request: Request,
     background_tasks: BackgroundTasks,
     q: str = "",
-    brand_: Optional[List[str]] = Query(None, alias="brand[]"),
-    product_type_: Optional[List[str]] = Query(None, alias="product_type[]"),
-    category_: Optional[List[str]] = Query(None, alias="category[]"),
+    brand_: Optional[List[str]] = Query(
+        None, alias="brand"
+    ),  # Updated to match frontend params
+    product_type_: Optional[List[str]] = Query(None, alias="product_type"),
+    category_: Optional[List[str]] = Query(None, alias="category"),
     price_min: Optional[float] = Query(None),
     price_max: Optional[float] = Query(None),
     es: Elasticsearch = Depends(get_es),
@@ -644,22 +651,39 @@ async def product_list_v6(
     sort_order: str = "desc",
     page: int = 1,
 ):
+    # 1. Extract Dynamic Attribute Filters
+    # This look for any param starting with 'attr_' and converts it to a Dict[str, List[str]]
+    attr_filters: Dict[str, List[str]] = {}
+    for key, value in request.query_params.multi_items():
+        if key.startswith("attr_"):
+            attr_name = key.replace("attr_", "")
+            # Split by comma because frontend sends: attr_Color=Red,Blue
+            attr_values = value.split(",")
+            if attr_name in attr_filters:
+                attr_filters[attr_name].extend(attr_values)
+            else:
+                attr_filters[attr_name] = attr_values
 
+    # 2. Prepare Standard Filters
     filters = {
         "brand": brand_,
         "product_type": product_type_,
         "category": category_,
         "price_min": price_min,
         "price_max": price_max,
+        "attr_filters": attr_filters,  # Added to the payload for logging
     }
+
+    # 3. Call your ES logic
     data = await get_product_list_v6(
         es,
         q,
-        brand=filters.get("brand"),
-        product_type=filters.get("product_type"),
-        category=filters.get("category"),
-        min_price=filters.get("price_min"),
-        max_price=filters.get("price_max"),
+        brand=brand_,
+        product_type=product_type_,
+        category=category_,
+        attr_filters=attr_filters,  # <--- PASSING THE DYNAMIC DICT HERE
+        min_price=price_min,
+        max_price=price_max,
         sort_by=sort_by,
         sort_order=sort_order,
         page=page,
@@ -672,6 +696,7 @@ async def product_list_v6(
         "page": page,
     }
 
+    # 4. Background Tasks
     background_tasks.add_task(
         save_search_result,
         es,
@@ -680,14 +705,14 @@ async def product_list_v6(
         data,
         request.headers.get("X-FE-URL", str(request.url)),
     )
-    if q:
-        product_ids = [item["id"] for item in data["results"]]
 
+    if q:
+        product_ids = [item["id"] for item in data.get("results", [])]
         background_tasks.add_task(
             increment_search_popularity, es, ESCollection.PRODUCT_V7.value, product_ids
         )
 
-    return {"total": len(data), "data": data}
+    return {"total": data.get("total_docs_after_filter", 0), "data": data}
 
 
 # @router.get("/product/v6/auto-complete/")
