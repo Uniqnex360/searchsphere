@@ -1,6 +1,6 @@
 import re
 import time
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -627,9 +627,6 @@ async def update_product_data_v6(
 ):
     await sync_product_suggest_data_es_v6(es, session, start_id=start_id)
     return {}
-
-
-
 
 
 @router.get("/product/v6/list/")
