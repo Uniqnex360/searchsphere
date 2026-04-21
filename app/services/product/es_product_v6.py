@@ -659,9 +659,9 @@ def add_sort(es_sort, field, sort_order):
     )
 
 
+import time
 import re
-from typing import Any, Dict, List, Optional
-from elasticsearch import Elasticsearch
+from typing import List, Optional, Dict, Any
 
 
 async def get_product_list_v6(
@@ -679,6 +679,8 @@ async def get_product_list_v6(
     size: int = 50,
     index: str = "product_v7",
 ) -> Dict[str, Any]:
+
+    start_total = time.perf_counter()
 
     ES_MAX_WINDOW = 10000
     requested_from = (page - 1) * size
@@ -726,6 +728,8 @@ async def get_product_list_v6(
         }
     }
 
+    # 1. Build Filters & Query
+    start_build = time.perf_counter()
     filters = []
     if brand:
         filters.append({"terms": {"brand.keyword": brand}})
@@ -768,6 +772,7 @@ async def get_product_list_v6(
                                         "suggest^20",
                                     ],
                                     "operator": "or",
+                                    "minimum_should_match": 1,
                                     "minimum_should_match": 1,
                                 }
                             }
@@ -957,9 +962,20 @@ async def get_product_list_v6(
         },
     }
 
+    build_duration = time.perf_counter() - start_build
+    print(f"Timing - [ES Internal] Query JSON Build: {build_duration:.4f}s")
+
+    # 2. Execute ES Calls
+    start_network = time.perf_counter()
     total_docs = (es.count(index=index)).get("count", 0)
     resp = es.search(index=index, body=body)
+    network_duration = time.perf_counter() - start_network
+    print(
+        f"Timing - [ES Internal] Network Call (Search + Count): {network_duration:.4f}s"
+    )
 
+    # 3. Process Results
+    start_mapping = time.perf_counter()
     hits = resp.get("hits", {}).get("hits", [])
     total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
 
@@ -1005,6 +1021,12 @@ async def get_product_list_v6(
             if name not in dynamic_facets:
                 dynamic_facets[name] = []
             dynamic_facets[name].append(val)
+
+    mapping_duration = time.perf_counter() - start_mapping
+    print(f"Timing - [ES Internal] Result Mapping & Facets: {mapping_duration:.4f}s")
+
+    total_fn_duration = time.perf_counter() - start_total
+    print(f"Timing - [ES Internal] Total Function Time: {total_fn_duration:.4f}s")
 
     return {
         "total_docs_after_filter": total_hits,

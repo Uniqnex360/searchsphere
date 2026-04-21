@@ -1,4 +1,5 @@
 import re
+import time
 from typing import Optional, List
 from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
@@ -628,6 +629,9 @@ async def update_product_data_v6(
     return {}
 
 
+
+
+
 @router.get("/product/v6/list/")
 async def product_list_v6(
     request: Request,
@@ -646,8 +650,10 @@ async def product_list_v6(
     sort_order: str = "desc",
     page: int = 1,
 ):
+    start_total = time.perf_counter()
+
     # 1. Extract Dynamic Attribute Filters
-    # This look for any param starting with 'attr_' and converts it to a Dict[str, List[str]]
+    start_attr = time.perf_counter()
     attr_filters: Dict[str, List[str]] = {}
     for key, value in request.query_params.multi_items():
         if key.startswith("attr_"):
@@ -658,6 +664,9 @@ async def product_list_v6(
                 attr_filters[attr_name].extend(attr_values)
             else:
                 attr_filters[attr_name] = attr_values
+
+    attr_duration = time.perf_counter() - start_attr
+    print(f"Timing - Dynamic Attr Extraction: {attr_duration:.4f}s")
 
     # 2. Prepare Standard Filters
     filters = {
@@ -670,6 +679,7 @@ async def product_list_v6(
     }
 
     # 3. Call your ES logic
+    start_es = time.perf_counter()
     data = await get_product_list_v6(
         es,
         q,
@@ -683,6 +693,8 @@ async def product_list_v6(
         sort_order=sort_order,
         page=page,
     )
+    es_duration = time.perf_counter() - start_es
+    print(f"Timing - Elasticsearch Query: {es_duration:.4f}s")
 
     query_payload = {
         "q": q,
@@ -706,6 +718,9 @@ async def product_list_v6(
         background_tasks.add_task(
             increment_search_popularity, es, ESCollection.PRODUCT_V7.value, product_ids
         )
+
+    total_duration = time.perf_counter() - start_total
+    print(f"Timing - Total Request v6: {total_duration:.4f}s")
 
     return {"total": data.get("total_docs_after_filter", 0), "data": data}
 
