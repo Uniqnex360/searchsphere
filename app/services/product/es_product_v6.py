@@ -664,6 +664,12 @@ import re
 from typing import List, Optional, Dict, Any
 
 
+import time
+import re
+from typing import List, Optional, Dict, Any
+from elasticsearch import Elasticsearch
+
+
 async def get_product_list_v6(
     es: Elasticsearch,
     query: str = None,
@@ -755,7 +761,8 @@ async def get_product_list_v6(
         if not q:
             return {"match_all": {}}
 
-        q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q.lower().strip())
+        q_clean = q.strip()
+        q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
 
         return {
             "function_score": {
@@ -777,7 +784,18 @@ async def get_product_list_v6(
                             }
                         ],
                         "should": [
-                            # 🔥 Exact brand match (added)
+                            {
+                                "term": {
+                                    "sku.keyword": {"value": q_clean, "boost": 20000}
+                                }
+                            },
+                            {
+                                "term": {
+                                    "mpn.keyword": {"value": q_clean, "boost": 18000}
+                                }
+                            },
+                            {"match": {"sku": {"query": q_expanded, "boost": 5000}}},
+                            {"match": {"mpn": {"query": q_expanded, "boost": 4000}}},
                             {
                                 "term": {
                                     "brand.keyword": {
@@ -791,7 +809,6 @@ async def get_product_list_v6(
                                     "brand": {"query": q_expanded, "boost": 5000}
                                 }
                             },
-                            # 🔥 Suggest matching (added)
                             {
                                 "term": {
                                     "suggest.keyword": {
@@ -827,7 +844,7 @@ async def get_product_list_v6(
                                 "multi_match": {
                                     "query": q_expanded,
                                     "fields": ["attributes.value^80"],
-                                    "fuzziness": "AUTO:4,6",  # updated
+                                    "fuzziness": "AUTO:4,6",
                                     "operator": "and",
                                     "boost": 500,
                                 }
@@ -841,7 +858,7 @@ async def get_product_list_v6(
                                         "product_type^60",
                                         "category^40",
                                     ],
-                                    "fuzziness": "AUTO:4,6",  # updated
+                                    "fuzziness": "AUTO:4,6",
                                     "prefix_length": 1,
                                     "operator": "and",
                                     "boost": 300,
@@ -907,7 +924,6 @@ async def get_product_list_v6(
             "search_popularity",
         ],
         "aggs": {
-            # 🔥 GLOBAL AGGREGATION: This fetches the total 400k count without a second call
             "all_docs_count": {"global": {}},
             "brands": {
                 "filter": {
@@ -959,36 +975,30 @@ async def get_product_list_v6(
                     }
                 },
             },
-            "dynamic_attributes": {"terms": {"field": "attr_pairs", "size": 2000}},
+            # 🔥 FIXED: Nested dynamic_attributes inside a filter so they respect brands/categories/etc.
+            "dynamic_attributes_filtered": {
+                "filter": {"bool": {"must": filters}},
+                "aggs": {"values": {"terms": {"field": "attr_pairs", "size": 2000}}},
+            },
         },
     }
 
     build_duration = time.perf_counter() - start_build
     print(f"Timing - [ES Internal] Query JSON Build: {build_duration:.4f}s")
 
-    # 2. Execute ES Calls
     start_network = time.perf_counter()
-
-    # We execute ONLY the search call now
     resp = es.search(index=index, body=body)
 
-    # total_hits is your filtered count (e.g., 4,000)
     total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
-
-    # total_docs is your absolute total (e.g., 400,000) fetched from the global aggregation
     total_docs = (
         resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
     )
 
     network_duration = time.perf_counter() - start_network
-    print(
-        f"Timing - [ES Internal] Network Call (Search + Count Optimized): {network_duration:.4f}s"
-    )
+    print(f"Timing - [ES Internal] Network Call: {network_duration:.4f}s")
 
-    # 3. Process Results
     start_mapping = time.perf_counter()
     hits = resp.get("hits", {}).get("hits", [])
-
     results = []
     for hit in hits:
         source = hit["_source"]
@@ -1021,9 +1031,13 @@ async def get_product_list_v6(
             .get("buckets", [])
         ]
 
+    # 🔥 MAPPING FIXED: Adjusted to fetch from the new 'dynamic_attributes_filtered' structure
     dynamic_facets = {}
     attr_buckets = (
-        resp.get("aggregations", {}).get("dynamic_attributes", {}).get("buckets", [])
+        resp.get("aggregations", {})
+        .get("dynamic_attributes_filtered", {})
+        .get("values", {})
+        .get("buckets", [])
     )
     for b in attr_buckets:
         if ":::" in b["key"]:
