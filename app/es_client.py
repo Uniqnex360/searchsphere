@@ -14,7 +14,7 @@ _es_client = Elasticsearch(
     sniff_timeout=None,
     # ADDITION: Helps prevent the 28s timeout if a connection goes stale
     connections_per_node=10,
-    request_timeout=30,
+    request_timeout=240,
 )
 
 
