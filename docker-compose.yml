@@ -71,4 +71,4 @@ networks:
 volumes:
   es-data:
   uploads:
-  kibana-data:
+  # kibana-data:
