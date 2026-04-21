@@ -773,7 +773,6 @@ async def get_product_list_v6(
                                     ],
                                     "operator": "or",
                                     "minimum_should_match": 1,
-                                    "minimum_should_match": 1,
                                 }
                             }
                         ],
@@ -967,8 +966,16 @@ async def get_product_list_v6(
 
     # 2. Execute ES Calls
     start_network = time.perf_counter()
-    total_docs = (es.count(index=index)).get("count", 0)
+
+    # OPTIMIZATION: Instead of a separate count call, we'll extract total_docs from search metadata
+    # total_docs = (es.count(index=index)).get("count", 0)
+    # To maintain your logic, we execute only the search and fetch total from there.
+
     resp = es.search(index=index, body=body)
+
+    # Note: Using 'track_total_hits': True ensures this value is accurate
+    total_docs = resp.get("hits", {}).get("total", {}).get("value", 0)
+
     network_duration = time.perf_counter() - start_network
     print(
         f"Timing - [ES Internal] Network Call (Search + Count): {network_duration:.4f}s"
