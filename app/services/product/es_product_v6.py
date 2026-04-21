@@ -907,6 +907,8 @@ async def get_product_list_v6(
             "search_popularity",
         ],
         "aggs": {
+            # 🔥 GLOBAL AGGREGATION: This fetches the total 400k count without a second call
+            "all_docs_count": {"global": {}},
             "brands": {
                 "filter": {
                     "bool": {
@@ -967,24 +969,25 @@ async def get_product_list_v6(
     # 2. Execute ES Calls
     start_network = time.perf_counter()
 
-    # OPTIMIZATION: Instead of a separate count call, we'll extract total_docs from search metadata
-    # total_docs = (es.count(index=index)).get("count", 0)
-    # To maintain your logic, we execute only the search and fetch total from there.
-
+    # We execute ONLY the search call now
     resp = es.search(index=index, body=body)
 
-    # Note: Using 'track_total_hits': True ensures this value is accurate
-    total_docs = resp.get("hits", {}).get("total", {}).get("value", 0)
+    # total_hits is your filtered count (e.g., 4,000)
+    total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
+
+    # total_docs is your absolute total (e.g., 400,000) fetched from the global aggregation
+    total_docs = (
+        resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
+    )
 
     network_duration = time.perf_counter() - start_network
     print(
-        f"Timing - [ES Internal] Network Call (Search + Count): {network_duration:.4f}s"
+        f"Timing - [ES Internal] Network Call (Search + Count Optimized): {network_duration:.4f}s"
     )
 
     # 3. Process Results
     start_mapping = time.perf_counter()
     hits = resp.get("hits", {}).get("hits", [])
-    total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
 
     results = []
     for hit in hits:
