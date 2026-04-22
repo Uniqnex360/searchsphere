@@ -1015,7 +1015,9 @@ async def get_product_auto_complete_v6(
         "fallback_type": fallback_type,
     }
 
+
 from itertools import permutations
+
 
 def build_suggestions_chain(brand=None, product_type=None, category=None):
     """
@@ -1033,83 +1035,75 @@ def build_suggestions_chain(brand=None, product_type=None, category=None):
     return list(suggestions)
 
 
-
-
 @router.get("/product/sync-missing-es/")
 async def sync_missing_products_to_es(
-    sync: bool = Query(False, description="If True, actually index missing products to ES"),
+    sync: bool = Query(
+        False, description="If True, actually index and delete products"
+    ),
     batch_size: int = Query(300, le=1000),
-    limit: int = Query(25000, description="Max missing products to process"),
     index_name: str = ESCollection.PRODUCT_V7.value,
     session: AsyncSession = Depends(get_session),
     es: Elasticsearch = Depends(get_es),
 ):
-    
     es_service = ElasticsearchService(es, index_name)
-
     last_id = 0
     missing_count = 0
+    deleted_count = 0
     synced_count = 0
-    all_missing_data = []
+    all_missing_metadata = []
     all_errors = []
 
-    print(f"🚀 Starting scan. Sync Mode: {sync} | Index: {index_name}")
+    print(f"🚀 Starting Two-Way Sync. Mode: {sync} | Index: {index_name}")
 
-    # Force ES to refresh its index so our "existence check" is accurate
-    es.indices.refresh(index=index_name)
-
+    # --- STEP 1: FORWARD SYNC (Add Missing from PG to ES) ---
     while True:
-        # 1. Fetch batch from Postgres
         stmt = (
             select(Product)
             .options(
                 selectinload(Product.images),
                 selectinload(Product.features),
                 selectinload(Product.attributes),
-                selectinload(Product.videos),
-                selectinload(Product.documents),
                 selectinload(Product.category),
-                selectinload(Product.industry),
                 selectinload(Product.brand),
                 selectinload(Product.product_type),
             )
             .where(Product.id > last_id)
-            # Ensure we match dashboard logic (exclude soft-deleted)
-            .where(getattr(Product, 'deleted_at', None) == None)
+            .where(getattr(Product, "deleted_at", None) == None)
             .order_by(Product.id)
             .limit(batch_size)
         )
 
         result = await session.execute(stmt)
         products = result.scalars().all()
-
         if not products:
             break
 
-        # 2. Identify missing IDs via Elasticsearch
         product_map = {str(p.id): p for p in products}
         batch_ids = list(product_map.keys())
 
-        # FIX: Use keyword arguments for ES calls
+        # Check ES existence
         es_res = es.search(
             index=index_name,
             query={"ids": {"values": batch_ids}},
             source=False,
-            size=len(batch_ids)
+            size=len(batch_ids),
         )
         found_ids = {hit["_id"] for hit in es_res["hits"]["hits"]}
-        
-        # 3. Filter only those not in ES
-        missing_batch_products = [product_map[pid] for pid in batch_ids if pid not in found_ids]
-        
+
+        missing_batch_products = [
+            product_map[pid] for pid in batch_ids if pid not in found_ids
+        ]
+
         if missing_batch_products:
             actions = []
             for product in missing_batch_products:
                 # --- Transformation Logic ---
                 brand_name = product.brand.brand_name if product.brand else None
                 cat_name = product.category.name if product.category else None
-                type_name = product.product_type.product_type if product.product_type else None
-                
+                type_name = (
+                    product.product_type.product_type if product.product_type else None
+                )
+
                 all_suggestions = build_suggestions_chain(
                     brand=brand_name, product_type=type_name, category=cat_name
                 )
@@ -1124,52 +1118,104 @@ async def sync_missing_products_to_es(
                     "brand": brand_name,
                     "category": cat_name,
                     "all_suggestions": all_suggestions,
-                    "features": [{"name": f.name, "value": f.value} for f in product.features],
-                    "attributes": [{
-                        "name": a.attribute_name, 
-                        "value": a.attribute_value, 
-                        "uom": a.attribute_uom
-                    } for a in product.attributes],
-                    "images": [{"name": img.name, "url": img.url} for img in product.images],
+                    "features": [
+                        {"name": f.name, "value": f.value} for f in product.features
+                    ],
+                    "attributes": [
+                        {
+                            "name": a.attribute_name,
+                            "value": a.attribute_value,
+                            "uom": a.attribute_uom,
+                        }
+                        for a in product.attributes
+                    ],
+                    "images": [
+                        {"name": img.name, "url": img.url} for img in product.images
+                    ],
                 }
 
-                actions.append({
-                    "_index": index_name, # Explicitly provide index in the action
-                    "_op_type": "index", 
-                    "_id": str(product.id), 
-                    "_source": data
-                })
-                
-                # Metadata for response display
-                if len(all_missing_data) < limit:
-                    all_missing_data.append({
-                        "id": product.id, 
-                        "name": product.product_name, 
-                        "mpn": product.mpn
-                    })
+                actions.append(
+                    {
+                        "_index": index_name,
+                        "_op_type": "index",
+                        "_id": str(product.id),
+                        "_source": data,
+                    }
+                )
 
-            # 4. Perform Sync (using Keyword Arguments)
+                all_missing_metadata.append(
+                    {"id": product.id, "name": product.product_name}
+                )
+
             if sync and actions:
-                # FIX: Explicitly use keyword 'actions=' to satisfy ES client rules
-                success_count, errors = es_service.bulk(actions=actions)
-                synced_count += success_count
+                success, errors = es_service.bulk(actions=actions)
+                synced_count += success
                 if errors:
-                    all_errors.extend(errors[:10])
+                    all_errors.extend(errors[:5])
 
             missing_count += len(missing_batch_products)
 
-        # Update cursor for next batch
         last_id = int(batch_ids[-1])
-        print(f"✅ Checked up to ID {last_id}. Missing found in this run: {missing_count}")
+        print(
+            f"✅ Forward Sync: Checked up to ID {last_id}. Missing found so far: {missing_count}"
+        )
 
-        if len(all_missing_data) >= limit:
-            break
+    # --- STEP 2: BACKWARD SYNC (Remove Orphans from ES) ---
+    print("🔍 Checking for extra (orphan) docs in Elasticsearch...")
+
+    # Fetching IDs from ES. For more than 10k docs, use helpers.scan instead.
+    scroll_res = es.search(
+        index=index_name,
+        query={"match_all": {}},
+        source=False,
+        fields=["_id"],
+        size=10000,
+    )
+
+    es_all_ids = [hit["_id"] for hit in scroll_res["hits"]["hits"]]
+
+    # Process in smaller chunks to avoid Postgres parameter limits and type errors
+    sql_chunk_size = 500
+    for i in range(0, len(es_all_ids), sql_chunk_size):
+        chunk = es_all_ids[i : i + sql_chunk_size]
+
+        # FIX: Convert ES string IDs to Integers for Postgres compatibility
+        try:
+            int_chunk = [int(oid) for oid in chunk]
+        except ValueError:
+            # Handle cases where ES IDs might not be numeric
+            continue
+
+        # Check which IDs actually exist in Postgres
+        valid_pg_stmt = select(Product.id).where(Product.id.in_(int_chunk))
+        valid_pg_res = await session.execute(valid_pg_stmt)
+        # Convert back to strings for comparison with ES IDs
+        valid_pg_ids = {str(r) for r in valid_pg_res.scalars().all()}
+
+        # Find IDs that are in ES but NOT in the valid Postgres list
+        orphans = [oid for oid in chunk if oid not in valid_pg_ids]
+
+        if orphans:
+            if sync:
+                delete_actions = [
+                    {"_op_type": "delete", "_index": index_name, "_id": oid}
+                    for oid in orphans
+                ]
+                success, d_errors = es_service.bulk(actions=delete_actions)
+                deleted_count += len(delete_actions)
+                if d_errors:
+                    all_errors.extend(d_errors[:5])
+            else:
+                deleted_count += len(orphans)
+
+    print(f"🧹 Orphan check complete. Orphans found: {deleted_count}")
 
     return {
         "status": "Success" if not all_errors else "Partial Success",
         "sync_enabled": sync,
-        "missing_count_detected": missing_count,
-        "successfully_synced": synced_count,
-        "sample_errors": all_errors[:5],
-        "data": all_missing_data
+        "missing_created": synced_count,
+        "orphans_deleted": deleted_count,
+        "total_missing_detected": missing_count,
+        "sample_data": all_missing_metadata[:10],
+        "errors": all_errors[:5],
     }
