@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func, desc
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 from sqlalchemy import select, func, desc, asc, cast, String, case, and_
 from sqlalchemy.sql.sqltypes import String
 
@@ -722,181 +722,6 @@ async def product_list_v6(
     return {"total": data.get("total_docs_after_filter", 0), "data": data}
 
 
-# @router.get("/product/v6/auto-complete/")
-# async def get_product_auto_complete_v6(
-#     q: str = Query(..., min_length=1),
-#     size: int = 10,
-#     es: Elasticsearch = Depends(get_es),
-# ):
-#     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
-#     q_clean = q.strip().lower()
-
-#     if not q_clean:
-#         return {
-#             "success": True,
-#             "query": q,
-#             "primary_results": [],
-#             "fallback_results": [],
-#         }
-
-#     q_words = q_clean.split()
-
-#     # ---------------------------------------------------------
-#     # 🔹 1. OPTIMIZED SEARCH QUERY (Now using .autocomplete for attributes)
-#     # ---------------------------------------------------------
-#     search_query = {
-#         "size": 200,
-#         "query": {
-#             "bool": {
-#                 "should": [
-#                     {
-#                         # TIER 1: Exact Prefix matching across all fields
-#                         "multi_match": {
-#                             "query": q_clean,
-#                             "type": "bool_prefix",
-#                             "fields": [
-#                                 "brand_category_product_type_attribute.autocomplete^25",  # NEW: Using autocomplete field
-#                                 "brand_category_product_type.autocomplete^15",
-#                                 "brand_category.autocomplete^10",
-#                                 "brand_name.autocomplete^5",
-#                             ],
-#                             "boost": 10,
-#                         }
-#                     },
-#                     {
-#                         # TIER 2: Fuzzy matching for typos
-#                         "multi_match": {
-#                             "query": q_clean,
-#                             "fields": [
-#                                 "brand_category_product_type_attribute^10",
-#                                 "brand_category_product_type^5",
-#                                 "brand_name^10",
-#                             ],
-#                             "fuzziness": "AUTO",
-#                             "prefix_length": 1,
-#                         }
-#                     },
-#                 ]
-#             }
-#         },
-#     }
-
-#     try:
-#         response = es.search(index=index_name, body=search_query)
-#         hits = response.get("hits", {}).get("hits", [])
-#     except Exception as e:
-#         return {"success": False, "error": str(e)}
-
-#     # ---------------------------------------------------------
-#     # 🔹 2. THREE-TIER BUCKETING & FILTERING
-#     # ---------------------------------------------------------
-#     primary_results = []
-#     did_you_mean_results = []
-#     seen = set()
-
-#     # Core prefix logic to prevent unrelated results (e.g., Wire Brushes for Aluminam)
-#     core_prefix = q_clean[:3]
-
-#     for hit in hits:
-#         source = hit.get("_source", {}) or {}
-#         score = hit.get("_score", 0)
-
-#         # Field weights for internal sorting
-#         fields = [
-#             ("attr", source.get("brand_category_product_type_attribute"), 3),
-#             ("type", source.get("brand_category_product_type"), 2),
-#             ("cat", source.get("brand_category"), 2),
-#             ("brand", source.get("brand_name"), 1),
-#         ]
-
-#         for f_type, values, priority in fields:
-#             if not values:
-#                 continue
-#             if isinstance(values, str):
-#                 values = [values]
-
-#             for v in values:
-#                 v_val = v.strip()
-#                 v_lower = v_val.lower()
-#                 if v_val in seen:
-#                     continue
-
-#                 # CHECK 1: Is it an exact word-for-word match? (Primary Bucket)
-#                 # If 'aluminum' is in the text, it goes to primary.
-#                 is_exact = all(word in v_lower for word in q_words)
-
-#                 # CHECK 2: Relevance Filter
-#                 # We allow fuzzy matches if it's a Brand (like Pferd)
-#                 # OR if it contains the core prefix (Alu)
-#                 is_brand = f_type == "brand"
-#                 has_prefix = core_prefix in v_lower
-
-#                 if is_exact:
-#                     primary_results.append(
-#                         {"text": v_val, "score": score, "priority": priority}
-#                     )
-#                     seen.add(v_val)
-#                 elif score > 7.0 and (is_brand or has_prefix):
-#                     did_you_mean_results.append(
-#                         {"text": v_val, "score": score, "priority": priority}
-#                     )
-#                     seen.add(v_val)
-
-#     # Sort results: Attribute (3) > Type/Cat (2) > Brand (1)
-#     primary_results.sort(key=lambda x: (-x["priority"], -x["score"]))
-#     did_you_mean_results.sort(key=lambda x: (-x["priority"], -x["score"]))
-
-#     # ---------------------------------------------------------
-#     # 🔹 3. RESPONSE ASSEMBLY
-#     # ---------------------------------------------------------
-#     final_primary = [{"text": x["text"]} for x in primary_results[:size]]
-#     final_fallback = []
-#     fallback_type = None
-
-#     if final_primary:
-#         # If primary results exist but don't fill the size, fill with fuzzy/DYM
-#         if len(final_primary) < size:
-#             remaining = size - len(final_primary)
-#             final_primary.extend(
-#                 [{"text": x["text"]} for x in did_you_mean_results[:remaining]]
-#             )
-
-#     elif did_you_mean_results:
-#         # No exact matches found, show fuzzy matches as Did You Mean
-#         final_fallback = [{"text": x["text"]} for x in did_you_mean_results[:size]]
-#         fallback_type = "did_you_mean"
-
-#     else:
-#         # Absolute Fallback: Popular Brands
-#         popular_query = {
-#             "size": 25,
-#             "_source": ["brand_name"],
-#             "query": {"match_all": {}},
-#         }
-#         try:
-#             pop_res = es.search(index=index_name, body=popular_query)
-#             pop_hits = pop_res.get("hits", {}).get("hits", [])
-#             seen_brands = set()
-#             for h in pop_hits:
-#                 brand = (h["_source"].get("brand_name") or "").strip()
-#                 if brand and brand not in seen_brands:
-#                     final_fallback.append({"text": brand})
-#                     seen_brands.add(brand)
-#                 if len(final_fallback) >= 8:
-#                     break
-#             fallback_type = "top_brands"
-#         except:
-#             pass
-
-#     return {
-#         "success": True,
-#         "query": q,
-#         "primary_results": final_primary,
-#         "fallback_results": final_fallback,
-#         "fallback_type": fallback_type,
-#     }
-
-
 # -----------------------------
 # 🔥 CLEAN FUNCTION (remove junk)
 # -----------------------------
@@ -1188,4 +1013,209 @@ async def get_product_auto_complete_v6(
         "primary_results": final_primary,
         "fallback_results": final_fallback,
         "fallback_type": fallback_type,
+    }
+
+
+from itertools import permutations
+
+
+def build_suggestions_chain(brand=None, product_type=None, category=None):
+    """
+    Build autocomplete suggestions using permutations of brand, product_type, category.
+    Returns a list of unique suggestions.
+    """
+    parts = [p for p in [brand, product_type, category] if p]
+
+    # Generate all non-empty permutations
+    suggestions = set()
+    for r in range(1, len(parts) + 1):
+        for perm in permutations(parts, r):
+            suggestions.add(" ".join(perm))
+
+    return list(suggestions)
+
+
+@router.get("/product/sync-missing-es/")
+async def sync_missing_products_to_es(
+    sync: bool = Query(
+        False, description="If True, actually index and delete products"
+    ),
+    batch_size: int = Query(300, le=1000),
+    index_name: str = ESCollection.PRODUCT_V7.value,
+    session: AsyncSession = Depends(get_session),
+    es: Elasticsearch = Depends(get_es),
+):
+    es_service = ElasticsearchService(es, index_name)
+    last_id = 0
+    missing_count = 0
+    deleted_count = 0
+    synced_count = 0
+    all_missing_metadata = []
+    all_errors = []
+
+    print(f"🚀 Starting Two-Way Sync. Mode: {sync} | Index: {index_name}")
+
+    # --- STEP 1: FORWARD SYNC (Add Missing from PG to ES) ---
+    while True:
+        stmt = (
+            select(Product)
+            .options(
+                selectinload(Product.images),
+                selectinload(Product.features),
+                selectinload(Product.attributes),
+                selectinload(Product.category),
+                selectinload(Product.brand),
+                selectinload(Product.product_type),
+            )
+            .where(Product.id > last_id)
+            .where(getattr(Product, "deleted_at", None) == None)
+            .order_by(Product.id)
+            .limit(batch_size)
+        )
+
+        result = await session.execute(stmt)
+        products = result.scalars().all()
+        if not products:
+            break
+
+        product_map = {str(p.id): p for p in products}
+        batch_ids = list(product_map.keys())
+
+        # Check ES existence
+        es_res = es.search(
+            index=index_name,
+            query={"ids": {"values": batch_ids}},
+            source=False,
+            size=len(batch_ids),
+        )
+        found_ids = {hit["_id"] for hit in es_res["hits"]["hits"]}
+
+        missing_batch_products = [
+            product_map[pid] for pid in batch_ids if pid not in found_ids
+        ]
+
+        if missing_batch_products:
+            actions = []
+            for product in missing_batch_products:
+                # --- Transformation Logic ---
+                brand_name = product.brand.brand_name if product.brand else None
+                cat_name = product.category.name if product.category else None
+                type_name = (
+                    product.product_type.product_type if product.product_type else None
+                )
+
+                all_suggestions = build_suggestions_chain(
+                    brand=brand_name, product_type=type_name, category=cat_name
+                )
+                all_suggestions += [v for v in [product.mpn, product.sku] if v]
+                all_suggestions = list(dict.fromkeys(all_suggestions))
+                all_suggestions.append(product.product_name)
+
+                data = {
+                    "product_name": product.product_name,
+                    "sku": product.sku,
+                    "mpn": product.mpn,
+                    "brand": brand_name,
+                    "category": cat_name,
+                    "all_suggestions": all_suggestions,
+                    "features": [
+                        {"name": f.name, "value": f.value} for f in product.features
+                    ],
+                    "attributes": [
+                        {
+                            "name": a.attribute_name,
+                            "value": a.attribute_value,
+                            "uom": a.attribute_uom,
+                        }
+                        for a in product.attributes
+                    ],
+                    "images": [
+                        {"name": img.name, "url": img.url} for img in product.images
+                    ],
+                }
+
+                actions.append(
+                    {
+                        "_index": index_name,
+                        "_op_type": "index",
+                        "_id": str(product.id),
+                        "_source": data,
+                    }
+                )
+
+                all_missing_metadata.append(
+                    {"id": product.id, "name": product.product_name}
+                )
+
+            if sync and actions:
+                success, errors = es_service.bulk(actions=actions)
+                synced_count += success
+                if errors:
+                    all_errors.extend(errors[:5])
+
+            missing_count += len(missing_batch_products)
+
+        last_id = int(batch_ids[-1])
+        print(
+            f"✅ Forward Sync: Checked up to ID {last_id}. Missing found so far: {missing_count}"
+        )
+
+    # --- STEP 2: BACKWARD SYNC (Remove Orphans from ES) ---
+    print("🔍 Checking for extra (orphan) docs in Elasticsearch...")
+
+    # Fetching IDs from ES. For more than 10k docs, use helpers.scan instead.
+    scroll_res = es.search(
+        index=index_name,
+        query={"match_all": {}},
+        source=False,
+        fields=["_id"],
+        size=10000,
+    )
+
+    es_all_ids = [hit["_id"] for hit in scroll_res["hits"]["hits"]]
+
+    # Process in smaller chunks to avoid Postgres parameter limits and type errors
+    sql_chunk_size = 500
+    for i in range(0, len(es_all_ids), sql_chunk_size):
+        chunk = es_all_ids[i : i + sql_chunk_size]
+
+        # FIX: Convert ES string IDs to Integers for Postgres compatibility
+        try:
+            int_chunk = [int(oid) for oid in chunk]
+        except ValueError:
+            # Handle cases where ES IDs might not be numeric
+            continue
+
+        # Check which IDs actually exist in Postgres
+        valid_pg_stmt = select(Product.id).where(Product.id.in_(int_chunk))
+        valid_pg_res = await session.execute(valid_pg_stmt)
+        # Convert back to strings for comparison with ES IDs
+        valid_pg_ids = {str(r) for r in valid_pg_res.scalars().all()}
+
+        # Find IDs that are in ES but NOT in the valid Postgres list
+        orphans = [oid for oid in chunk if oid not in valid_pg_ids]
+
+        if orphans:
+            if sync:
+                delete_actions = [
+                    {"_op_type": "delete", "_index": index_name, "_id": oid}
+                    for oid in orphans
+                ]
+                success, d_errors = es_service.bulk(actions=delete_actions)
+                deleted_count += len(delete_actions)
+                if d_errors:
+                    all_errors.extend(d_errors[:5])
+            else:
+                deleted_count += len(orphans)
+
+    print(f"🧹 Orphan check complete. Orphans found: {deleted_count}")
+
+    return {
+        "status": "Success" if not all_errors else "Partial Success",
+        "sync_enabled": sync,
+        "missing_created": synced_count,
+        "orphans_deleted": deleted_count,
+        "total_missing_detected": missing_count,
+        "sample_data": all_missing_metadata[:10],
+        "errors": all_errors[:5],
     }
