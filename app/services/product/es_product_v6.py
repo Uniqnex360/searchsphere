@@ -219,8 +219,14 @@ async def get_product_list_v6(
         if not q:
             return {"match_all": {}}
 
-        q_clean = q.strip()
-        q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
+        ignore_list = ["3m"]
+
+        if q.lower() not in ignore_list:
+            q_clean = q.strip()
+            q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
+        else:
+            q_clean = q.strip()
+            q_expanded = q
 
         return {
             "function_score": {
@@ -242,6 +248,24 @@ async def get_product_list_v6(
                             }
                         ],
                         "should": [
+                            {
+                                "term": {
+                                    "brand": {
+                                        "value": q_clean,
+                                        "boost": 30000,
+                                        "case_insensitive": True,
+                                    }
+                                }
+                            },
+                            {
+                                "term": {
+                                    "brand.keyword": {
+                                        "value": q_clean,
+                                        "boost": 30000,
+                                        "case_insensitive": True,
+                                    }
+                                }
+                            },
                             {
                                 "term": {
                                     "sku.keyword": {"value": q_clean, "boost": 20000}
