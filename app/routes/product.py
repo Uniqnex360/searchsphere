@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func, desc
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 from sqlalchemy import select, func, desc, asc, cast, String, case, and_
 from sqlalchemy.sql.sqltypes import String
 
@@ -722,181 +722,6 @@ async def product_list_v6(
     return {"total": data.get("total_docs_after_filter", 0), "data": data}
 
 
-# @router.get("/product/v6/auto-complete/")
-# async def get_product_auto_complete_v6(
-#     q: str = Query(..., min_length=1),
-#     size: int = 10,
-#     es: Elasticsearch = Depends(get_es),
-# ):
-#     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
-#     q_clean = q.strip().lower()
-
-#     if not q_clean:
-#         return {
-#             "success": True,
-#             "query": q,
-#             "primary_results": [],
-#             "fallback_results": [],
-#         }
-
-#     q_words = q_clean.split()
-
-#     # ---------------------------------------------------------
-#     # 🔹 1. OPTIMIZED SEARCH QUERY (Now using .autocomplete for attributes)
-#     # ---------------------------------------------------------
-#     search_query = {
-#         "size": 200,
-#         "query": {
-#             "bool": {
-#                 "should": [
-#                     {
-#                         # TIER 1: Exact Prefix matching across all fields
-#                         "multi_match": {
-#                             "query": q_clean,
-#                             "type": "bool_prefix",
-#                             "fields": [
-#                                 "brand_category_product_type_attribute.autocomplete^25",  # NEW: Using autocomplete field
-#                                 "brand_category_product_type.autocomplete^15",
-#                                 "brand_category.autocomplete^10",
-#                                 "brand_name.autocomplete^5",
-#                             ],
-#                             "boost": 10,
-#                         }
-#                     },
-#                     {
-#                         # TIER 2: Fuzzy matching for typos
-#                         "multi_match": {
-#                             "query": q_clean,
-#                             "fields": [
-#                                 "brand_category_product_type_attribute^10",
-#                                 "brand_category_product_type^5",
-#                                 "brand_name^10",
-#                             ],
-#                             "fuzziness": "AUTO",
-#                             "prefix_length": 1,
-#                         }
-#                     },
-#                 ]
-#             }
-#         },
-#     }
-
-#     try:
-#         response = es.search(index=index_name, body=search_query)
-#         hits = response.get("hits", {}).get("hits", [])
-#     except Exception as e:
-#         return {"success": False, "error": str(e)}
-
-#     # ---------------------------------------------------------
-#     # 🔹 2. THREE-TIER BUCKETING & FILTERING
-#     # ---------------------------------------------------------
-#     primary_results = []
-#     did_you_mean_results = []
-#     seen = set()
-
-#     # Core prefix logic to prevent unrelated results (e.g., Wire Brushes for Aluminam)
-#     core_prefix = q_clean[:3]
-
-#     for hit in hits:
-#         source = hit.get("_source", {}) or {}
-#         score = hit.get("_score", 0)
-
-#         # Field weights for internal sorting
-#         fields = [
-#             ("attr", source.get("brand_category_product_type_attribute"), 3),
-#             ("type", source.get("brand_category_product_type"), 2),
-#             ("cat", source.get("brand_category"), 2),
-#             ("brand", source.get("brand_name"), 1),
-#         ]
-
-#         for f_type, values, priority in fields:
-#             if not values:
-#                 continue
-#             if isinstance(values, str):
-#                 values = [values]
-
-#             for v in values:
-#                 v_val = v.strip()
-#                 v_lower = v_val.lower()
-#                 if v_val in seen:
-#                     continue
-
-#                 # CHECK 1: Is it an exact word-for-word match? (Primary Bucket)
-#                 # If 'aluminum' is in the text, it goes to primary.
-#                 is_exact = all(word in v_lower for word in q_words)
-
-#                 # CHECK 2: Relevance Filter
-#                 # We allow fuzzy matches if it's a Brand (like Pferd)
-#                 # OR if it contains the core prefix (Alu)
-#                 is_brand = f_type == "brand"
-#                 has_prefix = core_prefix in v_lower
-
-#                 if is_exact:
-#                     primary_results.append(
-#                         {"text": v_val, "score": score, "priority": priority}
-#                     )
-#                     seen.add(v_val)
-#                 elif score > 7.0 and (is_brand or has_prefix):
-#                     did_you_mean_results.append(
-#                         {"text": v_val, "score": score, "priority": priority}
-#                     )
-#                     seen.add(v_val)
-
-#     # Sort results: Attribute (3) > Type/Cat (2) > Brand (1)
-#     primary_results.sort(key=lambda x: (-x["priority"], -x["score"]))
-#     did_you_mean_results.sort(key=lambda x: (-x["priority"], -x["score"]))
-
-#     # ---------------------------------------------------------
-#     # 🔹 3. RESPONSE ASSEMBLY
-#     # ---------------------------------------------------------
-#     final_primary = [{"text": x["text"]} for x in primary_results[:size]]
-#     final_fallback = []
-#     fallback_type = None
-
-#     if final_primary:
-#         # If primary results exist but don't fill the size, fill with fuzzy/DYM
-#         if len(final_primary) < size:
-#             remaining = size - len(final_primary)
-#             final_primary.extend(
-#                 [{"text": x["text"]} for x in did_you_mean_results[:remaining]]
-#             )
-
-#     elif did_you_mean_results:
-#         # No exact matches found, show fuzzy matches as Did You Mean
-#         final_fallback = [{"text": x["text"]} for x in did_you_mean_results[:size]]
-#         fallback_type = "did_you_mean"
-
-#     else:
-#         # Absolute Fallback: Popular Brands
-#         popular_query = {
-#             "size": 25,
-#             "_source": ["brand_name"],
-#             "query": {"match_all": {}},
-#         }
-#         try:
-#             pop_res = es.search(index=index_name, body=popular_query)
-#             pop_hits = pop_res.get("hits", {}).get("hits", [])
-#             seen_brands = set()
-#             for h in pop_hits:
-#                 brand = (h["_source"].get("brand_name") or "").strip()
-#                 if brand and brand not in seen_brands:
-#                     final_fallback.append({"text": brand})
-#                     seen_brands.add(brand)
-#                 if len(final_fallback) >= 8:
-#                     break
-#             fallback_type = "top_brands"
-#         except:
-#             pass
-
-#     return {
-#         "success": True,
-#         "query": q,
-#         "primary_results": final_primary,
-#         "fallback_results": final_fallback,
-#         "fallback_type": fallback_type,
-#     }
-
-
 # -----------------------------
 # 🔥 CLEAN FUNCTION (remove junk)
 # -----------------------------
@@ -1188,4 +1013,163 @@ async def get_product_auto_complete_v6(
         "primary_results": final_primary,
         "fallback_results": final_fallback,
         "fallback_type": fallback_type,
+    }
+
+from itertools import permutations
+
+def build_suggestions_chain(brand=None, product_type=None, category=None):
+    """
+    Build autocomplete suggestions using permutations of brand, product_type, category.
+    Returns a list of unique suggestions.
+    """
+    parts = [p for p in [brand, product_type, category] if p]
+
+    # Generate all non-empty permutations
+    suggestions = set()
+    for r in range(1, len(parts) + 1):
+        for perm in permutations(parts, r):
+            suggestions.add(" ".join(perm))
+
+    return list(suggestions)
+
+
+
+
+@router.get("/product/sync-missing-es/")
+async def sync_missing_products_to_es(
+    sync: bool = Query(False, description="If True, actually index missing products to ES"),
+    batch_size: int = Query(300, le=1000),
+    limit: int = Query(25000, description="Max missing products to process"),
+    index_name: str = ESCollection.PRODUCT_V7.value,
+    session: AsyncSession = Depends(get_session),
+    es: Elasticsearch = Depends(get_es),
+):
+    
+    es_service = ElasticsearchService(es, index_name)
+
+    last_id = 0
+    missing_count = 0
+    synced_count = 0
+    all_missing_data = []
+    all_errors = []
+
+    print(f"🚀 Starting scan. Sync Mode: {sync} | Index: {index_name}")
+
+    # Force ES to refresh its index so our "existence check" is accurate
+    es.indices.refresh(index=index_name)
+
+    while True:
+        # 1. Fetch batch from Postgres
+        stmt = (
+            select(Product)
+            .options(
+                selectinload(Product.images),
+                selectinload(Product.features),
+                selectinload(Product.attributes),
+                selectinload(Product.videos),
+                selectinload(Product.documents),
+                selectinload(Product.category),
+                selectinload(Product.industry),
+                selectinload(Product.brand),
+                selectinload(Product.product_type),
+            )
+            .where(Product.id > last_id)
+            # Ensure we match dashboard logic (exclude soft-deleted)
+            .where(getattr(Product, 'deleted_at', None) == None)
+            .order_by(Product.id)
+            .limit(batch_size)
+        )
+
+        result = await session.execute(stmt)
+        products = result.scalars().all()
+
+        if not products:
+            break
+
+        # 2. Identify missing IDs via Elasticsearch
+        product_map = {str(p.id): p for p in products}
+        batch_ids = list(product_map.keys())
+
+        # FIX: Use keyword arguments for ES calls
+        es_res = es.search(
+            index=index_name,
+            query={"ids": {"values": batch_ids}},
+            source=False,
+            size=len(batch_ids)
+        )
+        found_ids = {hit["_id"] for hit in es_res["hits"]["hits"]}
+        
+        # 3. Filter only those not in ES
+        missing_batch_products = [product_map[pid] for pid in batch_ids if pid not in found_ids]
+        
+        if missing_batch_products:
+            actions = []
+            for product in missing_batch_products:
+                # --- Transformation Logic ---
+                brand_name = product.brand.brand_name if product.brand else None
+                cat_name = product.category.name if product.category else None
+                type_name = product.product_type.product_type if product.product_type else None
+                
+                all_suggestions = build_suggestions_chain(
+                    brand=brand_name, product_type=type_name, category=cat_name
+                )
+                all_suggestions += [v for v in [product.mpn, product.sku] if v]
+                all_suggestions = list(dict.fromkeys(all_suggestions))
+                all_suggestions.append(product.product_name)
+
+                data = {
+                    "product_name": product.product_name,
+                    "sku": product.sku,
+                    "mpn": product.mpn,
+                    "brand": brand_name,
+                    "category": cat_name,
+                    "all_suggestions": all_suggestions,
+                    "features": [{"name": f.name, "value": f.value} for f in product.features],
+                    "attributes": [{
+                        "name": a.attribute_name, 
+                        "value": a.attribute_value, 
+                        "uom": a.attribute_uom
+                    } for a in product.attributes],
+                    "images": [{"name": img.name, "url": img.url} for img in product.images],
+                }
+
+                actions.append({
+                    "_index": index_name, # Explicitly provide index in the action
+                    "_op_type": "index", 
+                    "_id": str(product.id), 
+                    "_source": data
+                })
+                
+                # Metadata for response display
+                if len(all_missing_data) < limit:
+                    all_missing_data.append({
+                        "id": product.id, 
+                        "name": product.product_name, 
+                        "mpn": product.mpn
+                    })
+
+            # 4. Perform Sync (using Keyword Arguments)
+            if sync and actions:
+                # FIX: Explicitly use keyword 'actions=' to satisfy ES client rules
+                success_count, errors = es_service.bulk(actions=actions)
+                synced_count += success_count
+                if errors:
+                    all_errors.extend(errors[:10])
+
+            missing_count += len(missing_batch_products)
+
+        # Update cursor for next batch
+        last_id = int(batch_ids[-1])
+        print(f"✅ Checked up to ID {last_id}. Missing found in this run: {missing_count}")
+
+        if len(all_missing_data) >= limit:
+            break
+
+    return {
+        "status": "Success" if not all_errors else "Partial Success",
+        "sync_enabled": sync,
+        "missing_count_detected": missing_count,
+        "successfully_synced": synced_count,
+        "sample_errors": all_errors[:5],
+        "data": all_missing_data
     }
