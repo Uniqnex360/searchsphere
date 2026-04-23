@@ -388,11 +388,11 @@ async def get_product_list_v6(
     elif sort_by == "search_popularity":
         es_sort.append({"search_popularity": {"order": sort_order, "missing": "_last"}})
     elif sort_by == "base_price":
-        # Numbers are easier; missing: _last usually suffices
         es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
     else:
-        # Relevance sorting
         es_sort.append({"_score": {"order": sort_order}})
+
+    es_sort.append({"search_popularity": {"order": "desc", "missing": "_last"}})
 
     body = {
         "runtime_mappings": runtime_mappings,
@@ -465,7 +465,6 @@ async def get_product_list_v6(
                     }
                 },
             },
-            # 🔥 FIXED: Nested dynamic_attributes inside a filter so they respect brands/categories/etc.
             "dynamic_attributes_filtered": {
                 "filter": {"bool": {"must": filters}},
                 "aggs": {"values": {"terms": {"field": "attr_pairs", "size": 2000}}},
@@ -473,22 +472,43 @@ async def get_product_list_v6(
         },
     }
 
-    build_duration = time.perf_counter() - start_build
-    print(f"Timing - [ES Internal] Query JSON Build: {build_duration:.4f}s")
-
     start_network = time.perf_counter()
     resp = es.search(index=index, body=body)
 
-    total_hits = resp.get("hits", {}).get("total", {}).get("value", 0)
+    # FULL IDS (safe)
+    all_ids = [hit["_id"] for hit in resp["hits"]["hits"]]
+
+    search_after = None
+    if resp["hits"]["hits"] and "sort" in resp["hits"]["hits"][-1]:
+        search_after = resp["hits"]["hits"][-1]["sort"]
+
+    body.pop("from", None)
+
+    first_resp = resp  # IMPORTANT FIX
+
+    while search_after:
+        body["search_after"] = search_after
+        body["size"] = 5000
+
+        resp = es.search(index=index, body=body)
+        hits = resp["hits"]["hits"]
+
+        if not hits:
+            break
+
+        all_ids.extend([hit["_id"] for hit in hits])
+
+        if "sort" in hits[-1]:
+            search_after = hits[-1]["sort"]
+        else:
+            break
+
+    total_hits = first_resp.get("hits", {}).get("total", {}).get("value", 0)
     total_docs = (
-        resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
+        first_resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
     )
 
-    network_duration = time.perf_counter() - start_network
-    print(f"Timing - [ES Internal] Network Call: {network_duration:.4f}s")
-
-    start_mapping = time.perf_counter()
-    hits = resp.get("hits", {}).get("hits", [])
+    hits = first_resp.get("hits", {}).get("hits", [])
     results = []
     for hit in hits:
         source = hit["_source"]
@@ -515,20 +535,20 @@ async def get_product_list_v6(
     def get_buckets(agg_name):
         return [
             b["key"]
-            for b in resp.get("aggregations", {})
+            for b in first_resp.get("aggregations", {})
             .get(agg_name, {})
             .get("values", {})
             .get("buckets", [])
         ]
 
-    # 🔥 MAPPING FIXED: Adjusted to fetch from the new 'dynamic_attributes_filtered' structure
     dynamic_facets = {}
     attr_buckets = (
-        resp.get("aggregations", {})
+        first_resp.get("aggregations", {})
         .get("dynamic_attributes_filtered", {})
         .get("values", {})
         .get("buckets", [])
     )
+
     for b in attr_buckets:
         if ":::" in b["key"]:
             name, val = b["key"].split(":::", 1)
@@ -536,11 +556,7 @@ async def get_product_list_v6(
                 dynamic_facets[name] = []
             dynamic_facets[name].append(val)
 
-    mapping_duration = time.perf_counter() - start_mapping
-    print(f"Timing - [ES Internal] Result Mapping & Facets: {mapping_duration:.4f}s")
-
     total_fn_duration = time.perf_counter() - start_total
-    print(f"Timing - [ES Internal] Total Function Time: {total_fn_duration:.4f}s")
 
     return {
         "total_docs_after_filter": total_hits,
@@ -555,6 +571,7 @@ async def get_product_list_v6(
             "product_type": get_buckets("product_type"),
             "dynamic_attributes": dynamic_facets,
         },
+        "product_ids": all_ids,
     }
 
 

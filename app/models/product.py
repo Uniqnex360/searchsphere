@@ -122,6 +122,19 @@ class ProductSearchResult(BaseModel, table=True):
 
     url: Optional[str] = Field(default=None, nullable=True)
     total_result: Optional[int] = Field(default=None, nullable=True)
+    brand: Optional[list[str]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=True)
+    )
+    category: Optional[list[str]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=True)
+    )
+    product_type: Optional[list[str]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=True)
+    )
+
+    product_ids: Optional[list[int]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=True)
+    )
     query: Optional[Dict[str, Any]] = Field(
         default=None, sa_column=Column(JSON, nullable=True)
     )
