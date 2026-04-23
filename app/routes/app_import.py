@@ -1,8 +1,9 @@
 import tempfile
 import csv
+from datetime import date
 from io import StringIO
 from typing import Optional, List
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Query
@@ -142,33 +143,50 @@ async def upload_products_csv_v3(
     }
 
 
+
+
 @router.get("/import/list/")
 async def get_import_list(
     session: AsyncSession = Depends(get_session),
     status: Optional[CeleryTaskStatus] = Query(None, description="Filter by status"),
-    module_type: Optional[ImportType] = Query(
-        None, description="Filter by module type"
-    ),
+    module_type: Optional[ImportType] = Query(None, description="Filter by module type"),
+    start_date: Optional[date] = Query(None, description="Filter from this date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Filter to this date (YYYY-MM-DD)"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """Returns paginated list of APPImport entries with filters."""
+    """Returns paginated list of APPImport entries with date filters."""
 
-    # Base query
-    query = select(APPImport).order_by(desc(APPImport.created_at))
-
+    # 1. Build Base Filter Logic
+    filters = []
     if status:
-        query = query.where(APPImport.status == status)
+        filters.append(APPImport.status == status)
     if module_type:
-        query = query.where(APPImport.module_type == module_type)
+        filters.append(APPImport.module_type == module_type)
+    
+    # Date Filtering Logic
+    if start_date:
+        filters.append(APPImport.created_at >= start_date)
+    if end_date:
+        # Note: If created_at is a DateTime, you might want to ensure end_date 
+        # includes the full day (e.g., < end_date + 1 day)
+        filters.append(APPImport.created_at <= end_date)
 
-    # Count total rows
-    total_result = await session.execute(select(APPImport).where(query._whereclause))
-    total_count = len(total_result.scalars().all())
+    # 2. Optimized Count Query (Executes on DB, not in Python memory)
+    count_query = select(func.count()).select_from(APPImport)
+    if filters:
+        count_query = count_query.where(*filters)
+    
+    total_count_res = await session.execute(count_query)
+    total_count = total_count_res.scalar() or 0
 
-    # Fetch paginated results
+    # 3. Fetch Paginated Results
+    query = select(APPImport).order_by(desc(APPImport.created_at))
+    if filters:
+        query = query.where(*filters)
+    
     result = await session.execute(query.offset(offset).limit(limit))
-    imports: List[APPImport] = result.scalars().all()
+    imports = result.scalars().all()
 
     data = [
         {
