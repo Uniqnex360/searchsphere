@@ -89,6 +89,10 @@ async def create_or_get_index_v6(es: Elasticsearch, index_name: str, index_type:
 
 
 def add_sort(es_sort, field, sort_order):
+    field_key = f"{field}.keyword"
+
+    # STEP 1: The "Null/Empty" Priority Sort
+    # Remains "asc" so 0 (valid) comes before 1 (null/empty)
     es_sort.append(
         {
             "_script": {
@@ -97,17 +101,19 @@ def add_sort(es_sort, field, sort_order):
                 "script": {
                     "lang": "painless",
                     "source": """
-                    if (!doc.containsKey(params.f) || doc[params.f].empty || doc[params.f].value == null || doc[params.f].value == '') {
+                    if (!doc.containsKey(params.f) || doc[params.f].size() == 0 || doc[params.f].value == null || doc[params.f].value == "") {
                         return 1;
                     }
                     return 0;
                 """,
-                    "params": {"f": f"{field}.keyword"},
+                    "params": {"f": field_key},
                 },
             }
         }
     )
 
+    # STEP 2: The Case-Insensitive Data Sort
+    # We use a script to lowercase the value so 'Apple' and 'apple' are equal
     es_sort.append(
         {
             "_script": {
@@ -116,12 +122,10 @@ def add_sort(es_sort, field, sort_order):
                 "script": {
                     "lang": "painless",
                     "source": """
-                    if (!doc.containsKey(params.f) || doc[params.f].empty) {
-                        return "";
-                    }
+                    if (doc[params.f].size() == 0) return "";
                     return doc[params.f].value.toLowerCase();
                 """,
-                    "params": {"f": f"{field}.keyword"},
+                    "params": {"f": field_key},
                 },
             }
         }
@@ -374,16 +378,20 @@ async def get_product_list_v6(
 
     es_sort = []
     if sort_by == "product_name":
-        es_sort.append(
-            {"product_name.keyword": {"order": sort_order, "missing": "_last"}}
-        )
-    elif sort_by == "base_price":
-        es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
+        add_sort(es_sort, "product_name", sort_order)
+    elif sort_by == "brand":
+        add_sort(es_sort, "brand", sort_order)
+    elif sort_by == "product_type":
+        add_sort(es_sort, "product_type", sort_order)
+    elif sort_by == "category":
+        add_sort(es_sort, "category", sort_order)
     elif sort_by == "search_popularity":
         es_sort.append({"search_popularity": {"order": sort_order, "missing": "_last"}})
-    elif sort_by == "category":
-        es_sort.append({"category.keyword": {"order": sort_order, "missing": "_last"}})
+    elif sort_by == "base_price":
+        # Numbers are easier; missing: _last usually suffices
+        es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
     else:
+        # Relevance sorting
         es_sort.append({"_score": {"order": sort_order}})
 
     body = {
