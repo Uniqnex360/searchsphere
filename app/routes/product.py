@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload, joinedload
 from sqlalchemy import select, func, desc, asc, cast, String, case, and_
 from sqlalchemy.sql.sqltypes import String
 
-from fastapi import APIRouter, Depends, Query, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, Query, BackgroundTasks, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 
@@ -198,6 +198,7 @@ async def save_search_result(
     query_data: dict,
     data: dict,
     url: str,
+    product_ids: list[int],
     debug: bool = True,
 ):
     query = (query_data.get("q") or "").strip()
@@ -275,10 +276,20 @@ async def save_search_result(
     # -----------------------------
     query_data["tokens"] = debug_tokens if debug else None
     try:
+
+        filters = query_data.get("filters", {})
+        brand = filters.get("brand", [])
+        category = filters.get("category", [])
+        product_type = filters.get("product_type", [])
+
         obj = ProductSearchResult(
             query=query_data,
+            brand=brand,
+            category=category,
+            product_type=product_type,
             result=data,
             url=str(url),
+            product_ids=product_ids,
             total_result=data.get("total_docs_after_filter", None),
         )
 
@@ -494,6 +505,8 @@ async def get_product_search_keywords_list(
         func.count().label("search_count"),
         func.max(ProductSearchResult.created_at).label("created_at"),
         func.max(ProductSearchResult.url).label("url"),
+        # ✅ ADDED: representative id per group
+        func.max(ProductSearchResult.id).label("id"),
     ).where(ProductSearchResult.is_active == True)
 
     # 👉 Apply date filters
@@ -531,7 +544,6 @@ async def get_product_search_keywords_list(
         .where(ProductSearchResult.is_active == True)
     )
 
-    # 👉 Apply date filters
     if date_filters:
         total_count_query = total_count_query.where(and_(*date_filters))
 
@@ -580,6 +592,7 @@ async def get_product_search_keywords_list(
     # =========================================================
     final_query = (
         select(
+            cols.id,  # ✅ INCLUDED ID
             cols.q,
             cols.total_result,
             cols.url,
@@ -595,6 +608,7 @@ async def get_product_search_keywords_list(
 
     data = [
         {
+            "id": r.id,  # ✅ INCLUDED
             "q": r.q,
             "total_result": r.total_result,
             "url": r.url,
@@ -612,8 +626,8 @@ async def get_product_search_keywords_list(
         "meta": {
             "page": page,
             "limit": limit,
-            "total": total_count,  # raw count
-            "unique": unique_count,  # grouped count
+            "total": total_count,
+            "unique": unique_count,
             "pages": (unique_count + limit - 1) // limit,
         },
     }
@@ -699,7 +713,7 @@ async def product_list_v6(
         "filters": filters,
         "page": page,
     }
-
+    product_ids = data.pop("product_ids")
     # 4. Background Tasks
     background_tasks.add_task(
         save_search_result,
@@ -708,6 +722,7 @@ async def product_list_v6(
         query_payload,
         data,
         request.headers.get("X-FE-URL", str(request.url)),
+        product_ids=product_ids,
     )
 
     if q:
@@ -1218,4 +1233,278 @@ async def sync_missing_products_to_es(
         "total_missing_detected": missing_count,
         "sample_data": all_missing_metadata[:10],
         "errors": all_errors[:5],
+    }
+
+
+@router.get("/product/v7/list/{search_id}")
+async def product_list_v7(
+    request: Request,
+    search_id: int,
+    brand: Optional[List[str]] = Query(None),
+    product_type: Optional[List[str]] = Query(None),
+    category: Optional[List[str]] = Query(None),
+    price_min: Optional[float] = Query(None),
+    price_max: Optional[float] = Query(None),
+    sort_by: str = "relevance",
+    sort_order: str = "desc",
+    page: int = 1,
+    es: Elasticsearch = Depends(get_es),
+    session: AsyncSession = Depends(get_session),
+):
+    start_total = time.perf_counter()
+    size = 50
+    requested_from = (page - 1) * size
+
+    # 1. DATABASE FETCH
+    result = await session.execute(
+        select(ProductSearchResult).where(ProductSearchResult.id == search_id)
+    )
+    search_record = result.scalars().first()
+
+    if not search_record:
+        raise HTTPException(status_code=404, detail="Search record not found")
+
+    db_product_ids = search_record.product_ids
+
+    # --- FIX: Handle Dictionary or String for original_query ---
+    raw_query = search_record.query
+    if isinstance(raw_query, dict):
+        original_query = raw_query.get("q") or raw_query.get("query") or str(raw_query)
+    else:
+        original_query = raw_query or ""
+    # -----------------------------------------------------------
+
+    # 2. RUNTIME MAPPINGS
+    runtime_mappings = {
+        "attr_pairs": {
+            "type": "keyword",
+            "script": {
+                "source": """
+                if (params['_source'].attributes != null) {
+                    for (item in params['_source'].attributes) {
+                        if (item.name != null && item.value != null && item.value != "") {
+                            emit(item.name + ":::" + item.value);
+                        }
+                    }
+                }
+                """
+            },
+        }
+    }
+
+    # 3. BUILD FILTERS
+    filters = []
+    if brand:
+        filters.append({"terms": {"brand.keyword": brand}})
+    if product_type:
+        filters.append({"terms": {"product_type.keyword": product_type}})
+    if category:
+        filters.append({"terms": {"category.keyword": category}})
+
+    # Dynamic Attribute Extraction
+    attr_params = {
+        k.replace("attr_", ""): v.split(",")
+        for k, v in request.query_params.multi_items()
+        if k.startswith("attr_")
+    }
+    for name, vals in attr_params.items():
+        filters.append({"terms": {"attr_pairs": [f"{name}:::{v}" for v in vals]}})
+
+    if price_min is not None or price_max is not None:
+        p_range = {}
+        if price_min is not None:
+            p_range["gte"] = price_min
+        if price_max is not None:
+            p_range["lte"] = price_max
+        filters.append({"range": {"base_price": p_range}})
+
+    # 4. CORE QUERY LOGIC
+    if db_product_ids:
+        query_body = {"bool": {"filter": [{"ids": {"values": db_product_ids}}]}}
+    else:
+        # Safe Regex Expansion
+        q_expanded = ""
+        if isinstance(original_query, str) and original_query.strip():
+            q_expanded = re.sub(
+                r"(\d+)([a-zA-Z]+)", r"\1 \2", original_query.lower().strip()
+            )
+
+        query_body = (
+            {
+                "function_score": {
+                    "query": {
+                        "multi_match": {
+                            "query": q_expanded or original_query,
+                            "fields": ["brand^50", "product_name^30", "category^20"],
+                            "fuzziness": "AUTO",
+                        }
+                    },
+                    "field_value_factor": {
+                        "field": "search_popularity",
+                        "modifier": "log1p",
+                        "missing": 1,
+                    },
+                    "boost_mode": "multiply",
+                }
+            }
+            if original_query
+            else {"match_all": {}}
+        )
+
+    # 5. SORTING
+    es_sort = []
+    if sort_by in ["brand", "product_name", "category", "product_type"]:
+        field_key = f"{sort_by}.keyword"
+        es_sort.append(
+            {
+                "_script": {
+                    "type": "number",
+                    "order": "asc",
+                    "script": {"source": f"doc['{field_key}'].size() == 0 ? 1 : 0"},
+                }
+            }
+        )
+        es_sort.append(
+            {
+                "_script": {
+                    "type": "string",
+                    "order": sort_order,
+                    "script": {
+                        "source": f"doc['{field_key}'].size() == 0 ? '' : doc['{field_key}'].value.toLowerCase()"
+                    },
+                }
+            }
+        )
+    elif sort_by == "search_popularity":
+        es_sort.append({"search_popularity": {"order": sort_order, "missing": "_last"}})
+    elif sort_by == "base_price":
+        es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
+    else:
+        es_sort.append({"_score": {"order": sort_order}})
+
+    es_sort.append({"search_popularity": {"order": "desc", "missing": "_last"}})
+
+    # 6. EXECUTE SEARCH
+    body = {
+        "runtime_mappings": runtime_mappings,
+        "from": requested_from,
+        "size": size,
+        "query": query_body,
+        "post_filter": {"bool": {"must": filters}},
+        "track_total_hits": True,
+        "sort": es_sort,
+        "aggs": {
+            "all_docs_count": {"global": {}},
+            "brands": {
+                "filter": {
+                    "bool": {
+                        "must": [f for f in filters if "brand.keyword" not in str(f)]
+                    }
+                },
+                "aggs": {"values": {"terms": {"field": "brand.keyword", "size": 1000}}},
+            },
+            "product_type": {
+                "filter": {
+                    "bool": {
+                        "must": [
+                            f for f in filters if "product_type.keyword" not in str(f)
+                        ]
+                    }
+                },
+                "aggs": {
+                    "values": {"terms": {"field": "product_type.keyword", "size": 1000}}
+                },
+            },
+            "categories": {
+                "filter": {
+                    "bool": {
+                        "must": [f for f in filters if "category.keyword" not in str(f)]
+                    }
+                },
+                "aggs": {
+                    "values": {"terms": {"field": "category.keyword", "size": 1000}}
+                },
+            },
+            "dynamic_attributes_filtered": {
+                "filter": {"bool": {"must": filters}},
+                "aggs": {"values": {"terms": {"field": "attr_pairs", "size": 2000}}},
+            },
+        },
+        "_source": [
+            "product_name",
+            "brand",
+            "category",
+            "base_price",
+            "images.url",
+            "product_type",
+            "search_popularity",
+            "view_count",
+            "suggest",
+        ],
+    }
+
+    resp = es.search(index="product_v7", body=body)
+
+    # 7. PARSE DYNAMIC ATTRIBUTES
+    dynamic_facets = {}
+    attr_buckets = (
+        resp.get("aggregations", {})
+        .get("dynamic_attributes_filtered", {})
+        .get("values", {})
+        .get("buckets", [])
+    )
+    for b in attr_buckets:
+        if ":::" in b["key"]:
+            name, val = b["key"].split(":::", 1)
+            if name not in dynamic_facets:
+                dynamic_facets[name] = []
+            if val not in dynamic_facets[name]:
+                dynamic_facets[name].append(val)
+
+    # 8. PREPARE RETURN DATA
+    total_hits = resp["hits"]["total"]["value"]
+    total_docs = (
+        resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
+    )
+
+    return {
+        "total_docs_after_filter": total_hits,
+        "total_docs": total_docs,
+        "page": page,
+        "size": size,
+        "total_pages": (total_hits + size - 1) // size if total_hits > 0 else 0,
+        "results": [
+            {
+                "id": hit["_id"],
+                "score": hit["_score"],
+                "name": hit["_source"].get("product_name"),
+                "brand": hit["_source"].get("brand"),
+                "product_type": hit["_source"].get("product_type"),
+                "category": hit["_source"].get("category"),
+                "view_count": hit["_source"].get("view_count", 0),
+                "search_popularity": hit["_source"].get("search_popularity", 0),
+                "base_price": hit["_source"].get("base_price"),
+                "images": [
+                    i.get("url")
+                    for i in hit["_source"].get("images", [])
+                    if isinstance(i, dict)
+                ],
+                "suggest": hit["_source"].get("suggest", []),
+            }
+            for hit in resp["hits"]["hits"]
+        ],
+        "facets": {
+            "brands": [
+                b["key"] for b in resp["aggregations"]["brands"]["values"]["buckets"]
+            ],
+            "categories": [
+                b["key"]
+                for b in resp["aggregations"]["categories"]["values"]["buckets"]
+            ],
+            "product_type": [
+                b["key"]
+                for b in resp["aggregations"]["product_type"]["values"]["buckets"]
+            ],
+            "dynamic_attributes": dynamic_facets,
+        },
     }
