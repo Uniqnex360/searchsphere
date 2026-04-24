@@ -759,276 +759,276 @@ def clean_text(text: str):
     return text
 
 
-@router.get("/product/v6/auto-complete/")
-async def get_product_auto_complete_v6(
-    q: str = Query(..., min_length=1),
-    size: int = 10,
-    es: Elasticsearch = Depends(get_es),
-):
-    index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
-    product_index = ESCollection.PRODUCT_V7.value
+# @router.get("/product/v6/auto-complete/")
+# async def get_product_auto_complete_v6(
+#     q: str = Query(..., min_length=1),
+#     size: int = 10,
+#     es: Elasticsearch = Depends(get_es),
+# ):
+#     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+#     product_index = ESCollection.PRODUCT_V7.value
 
-    q_clean = q.strip().lower()
+#     q_clean = q.strip().lower()
 
-    if not q_clean:
-        return {
-            "success": True,
-            "query": q,
-            "primary_results": [],
-            "fallback_results": [],
-        }
+#     if not q_clean:
+#         return {
+#             "success": True,
+#             "query": q,
+#             "primary_results": [],
+#             "fallback_results": [],
+#         }
 
-    q_words = q_clean.split()
+#     q_words = q_clean.split()
 
-    # ---------------------------------------------------------
-    # 🔹 1. MAIN SEARCH QUERY (UNCHANGED)
-    # ---------------------------------------------------------
-    search_query = {
-        "size": 200,
-        "query": {
-            "bool": {
-                "should": [
-                    {
-                        "multi_match": {
-                            "query": q_clean,
-                            "type": "bool_prefix",
-                            "fields": [
-                                "brand_category_product_type_attribute.autocomplete^25",
-                                "brand_category_product_type.autocomplete^15",
-                                "brand_category.autocomplete^10",
-                                "brand_name.autocomplete^5",
-                            ],
-                            "boost": 10,
-                        }
-                    },
-                    {
-                        "multi_match": {
-                            "query": q_clean,
-                            "fields": [
-                                "brand_category_product_type_attribute^10",
-                                "brand_category_product_type^5",
-                                "brand_name^10",
-                            ],
-                            "fuzziness": "AUTO",
-                            "prefix_length": 1,
-                        }
-                    },
-                ]
-            }
-        },
-    }
+#     # ---------------------------------------------------------
+#     # 🔹 1. MAIN SEARCH QUERY (UNCHANGED)
+#     # ---------------------------------------------------------
+#     search_query = {
+#         "size": 200,
+#         "query": {
+#             "bool": {
+#                 "should": [
+#                     {
+#                         "multi_match": {
+#                             "query": q_clean,
+#                             "type": "bool_prefix",
+#                             "fields": [
+#                                 "brand_category_product_type_attribute.autocomplete^25",
+#                                 "brand_category_product_type.autocomplete^15",
+#                                 "brand_category.autocomplete^10",
+#                                 "brand_name.autocomplete^5",
+#                             ],
+#                             "boost": 10,
+#                         }
+#                     },
+#                     {
+#                         "multi_match": {
+#                             "query": q_clean,
+#                             "fields": [
+#                                 "brand_category_product_type_attribute^10",
+#                                 "brand_category_product_type^5",
+#                                 "brand_name^10",
+#                             ],
+#                             "fuzziness": "AUTO",
+#                             "prefix_length": 1,
+#                         }
+#                     },
+#                 ]
+#             }
+#         },
+#     }
 
-    try:
-        response = es.search(index=index_name, body=search_query)
-        hits = response.get("hits", {}).get("hits", [])
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+#     try:
+#         response = es.search(index=index_name, body=search_query)
+#         hits = response.get("hits", {}).get("hits", [])
+#     except Exception as e:
+#         return {"success": False, "error": str(e)}
 
-    # ---------------------------------------------------------
-    # 🔹 2. BUCKETING
-    # ---------------------------------------------------------
-    primary_results = []
-    did_you_mean_results = []
-    seen = set()
+#     # ---------------------------------------------------------
+#     # 🔹 2. BUCKETING
+#     # ---------------------------------------------------------
+#     primary_results = []
+#     did_you_mean_results = []
+#     seen = set()
 
-    core_prefix = q_clean[:3]
+#     core_prefix = q_clean[:3]
 
-    for hit in hits:
-        source = hit.get("_source", {}) or {}
-        score = hit.get("_score", 0)
+#     for hit in hits:
+#         source = hit.get("_source", {}) or {}
+#         score = hit.get("_score", 0)
 
-        fields = [
-            ("attr", source.get("brand_category_product_type_attribute"), 3),
-            ("type", source.get("brand_category_product_type"), 2),
-            ("cat", source.get("brand_category"), 2),
-            ("brand", source.get("brand_name"), 1),
-        ]
+#         fields = [
+#             ("attr", source.get("brand_category_product_type_attribute"), 3),
+#             ("type", source.get("brand_category_product_type"), 2),
+#             ("cat", source.get("brand_category"), 2),
+#             ("brand", source.get("brand_name"), 1),
+#         ]
 
-        for f_type, values, priority in fields:
-            if not values:
-                continue
-            if isinstance(values, str):
-                values = [values]
+#         for f_type, values, priority in fields:
+#             if not values:
+#                 continue
+#             if isinstance(values, str):
+#                 values = [values]
 
-            for v in values:
-                v_clean = clean_text(v)
-                if not v_clean or v_clean in seen:
-                    continue
+#             for v in values:
+#                 v_clean = clean_text(v)
+#                 if not v_clean or v_clean in seen:
+#                     continue
 
-                is_exact = all(word in v_clean for word in q_words)
-                is_brand = f_type == "brand"
-                has_prefix = core_prefix in v_clean
+#                 is_exact = all(word in v_clean for word in q_words)
+#                 is_brand = f_type == "brand"
+#                 has_prefix = core_prefix in v_clean
 
-                if is_exact:
-                    primary_results.append(
-                        {"text": v_clean, "score": score, "priority": priority}
-                    )
-                    seen.add(v_clean)
+#                 if is_exact:
+#                     primary_results.append(
+#                         {"text": v_clean, "score": score, "priority": priority}
+#                     )
+#                     seen.add(v_clean)
 
-                elif score > 7.0 and (is_brand or has_prefix):
-                    did_you_mean_results.append(
-                        {"text": v_clean, "score": score, "priority": priority}
-                    )
-                    seen.add(v_clean)
+#                 elif score > 7.0 and (is_brand or has_prefix):
+#                     did_you_mean_results.append(
+#                         {"text": v_clean, "score": score, "priority": priority}
+#                     )
+#                     seen.add(v_clean)
 
-    primary_results.sort(key=lambda x: (-x["priority"], -x["score"]))
-    did_you_mean_results.sort(key=lambda x: (-x["priority"], -x["score"]))
+#     primary_results.sort(key=lambda x: (-x["priority"], -x["score"]))
+#     did_you_mean_results.sort(key=lambda x: (-x["priority"], -x["score"]))
 
-    final_primary = [{"text": x["text"]} for x in primary_results[:size]]
-    final_fallback = []
-    fallback_type = None
+#     final_primary = [{"text": x["text"]} for x in primary_results[:size]]
+#     final_fallback = []
+#     fallback_type = None
 
-    # ---------------------------------------------------------
-    # 🔥 STEP 1: PRIMARY EXISTS → ATTRIBUTE → PRODUCT NAME
-    # ---------------------------------------------------------
-    if final_primary:
-        if len(final_primary) < size:
-            attr_query = {
-                "size": 50,
-                "_source": ["product_name", "attributes.value"],
-                "query": {
-                    "bool": {
-                        "should": [
-                            {
-                                "match": {
-                                    "attributes.value": {
-                                        "query": q_clean,
-                                        "operator": "and",
-                                    }
-                                }
-                            },
-                            {
-                                "match": {
-                                    "product_name": {
-                                        "query": q_clean,
-                                        "fuzziness": "AUTO",
-                                        "boost": 3,
-                                    }
-                                }
-                            },
-                        ]
-                    }
-                },
-            }
+#     # ---------------------------------------------------------
+#     # 🔥 STEP 1: PRIMARY EXISTS → ATTRIBUTE → PRODUCT NAME
+#     # ---------------------------------------------------------
+#     if final_primary:
+#         if len(final_primary) < size:
+#             attr_query = {
+#                 "size": 50,
+#                 "_source": ["product_name", "attributes.value"],
+#                 "query": {
+#                     "bool": {
+#                         "should": [
+#                             {
+#                                 "match": {
+#                                     "attributes.value": {
+#                                         "query": q_clean,
+#                                         "operator": "and",
+#                                     }
+#                                 }
+#                             },
+#                             {
+#                                 "match": {
+#                                     "product_name": {
+#                                         "query": q_clean,
+#                                         "fuzziness": "AUTO",
+#                                         "boost": 3,
+#                                     }
+#                                 }
+#                             },
+#                         ]
+#                     }
+#                 },
+#             }
 
-            try:
-                attr_res = es.search(index=product_index, body=attr_query)
-                attr_hits = attr_res.get("hits", {}).get("hits", [])
+#             try:
+#                 attr_res = es.search(index=product_index, body=attr_query)
+#                 attr_hits = attr_res.get("hits", {}).get("hits", [])
 
-                seen_final = set([x["text"] for x in final_primary])
+#                 seen_final = set([x["text"] for x in final_primary])
 
-                for h in attr_hits:
-                    src = h.get("_source", {}) or {}
+#                 for h in attr_hits:
+#                     src = h.get("_source", {}) or {}
 
-                    # 🔥 ONLY PRODUCT NAME (NO ATTRIBUTES SHOWN)
-                    pname = clean_text(src.get("product_name"))
-                    if pname and pname not in seen_final:
-                        final_primary.append({"text": pname})
-                        seen_final.add(pname)
+#                     # 🔥 ONLY PRODUCT NAME (NO ATTRIBUTES SHOWN)
+#                     pname = clean_text(src.get("product_name"))
+#                     if pname and pname not in seen_final:
+#                         final_primary.append({"text": pname})
+#                         seen_final.add(pname)
 
-                    if len(final_primary) >= size:
-                        break
+#                     if len(final_primary) >= size:
+#                         break
 
-            except:
-                pass
+#             except:
+#                 pass
 
-    # ---------------------------------------------------------
-    # 🔥 STEP 2: NO PRIMARY → ATTRIBUTE FIRST
-    # ---------------------------------------------------------
-    else:
-        attr_query = {
-            "size": 50,
-            "_source": ["product_name", "attributes.value"],
-            "query": {
-                "bool": {
-                    "should": [
-                        {
-                            "match": {
-                                "attributes.value": {
-                                    "query": q_clean,
-                                    "operator": "and",
-                                }
-                            }
-                        },
-                        {
-                            "match": {
-                                "product_name": {
-                                    "query": q_clean,
-                                    "fuzziness": "AUTO",
-                                }
-                            }
-                        },
-                    ]
-                }
-            },
-        }
+#     # ---------------------------------------------------------
+#     # 🔥 STEP 2: NO PRIMARY → ATTRIBUTE FIRST
+#     # ---------------------------------------------------------
+#     else:
+#         attr_query = {
+#             "size": 50,
+#             "_source": ["product_name", "attributes.value"],
+#             "query": {
+#                 "bool": {
+#                     "should": [
+#                         {
+#                             "match": {
+#                                 "attributes.value": {
+#                                     "query": q_clean,
+#                                     "operator": "and",
+#                                 }
+#                             }
+#                         },
+#                         {
+#                             "match": {
+#                                 "product_name": {
+#                                     "query": q_clean,
+#                                     "fuzziness": "AUTO",
+#                                 }
+#                             }
+#                         },
+#                     ]
+#                 }
+#             },
+#         }
 
-        try:
-            attr_res = es.search(index=product_index, body=attr_query)
-            attr_hits = attr_res.get("hits", {}).get("hits", [])
+#         try:
+#             attr_res = es.search(index=product_index, body=attr_query)
+#             attr_hits = attr_res.get("hits", {}).get("hits", [])
 
-            seen_final = set()
+#             seen_final = set()
 
-            for h in attr_hits:
-                src = h.get("_source", {}) or {}
+#             for h in attr_hits:
+#                 src = h.get("_source", {}) or {}
 
-                pname = clean_text(src.get("product_name"))
-                if pname and pname not in seen_final:
-                    final_fallback.append({"text": pname})
-                    seen_final.add(pname)
+#                 pname = clean_text(src.get("product_name"))
+#                 if pname and pname not in seen_final:
+#                     final_fallback.append({"text": pname})
+#                     seen_final.add(pname)
 
-                if len(final_fallback) >= size:
-                    break
+#                 if len(final_fallback) >= size:
+#                     break
 
-        except:
-            pass
+#         except:
+#             pass
 
-        # ---------------------------------------------------------
-        # 🔥 STEP 3: DID YOU MEAN
-        # ---------------------------------------------------------
-        if len(final_fallback) < size and did_you_mean_results:
-            remaining = size - len(final_fallback)
-            final_fallback.extend(
-                [{"text": x["text"]} for x in did_you_mean_results[:remaining]]
-            )
-            fallback_type = "attribute_then_did_you_mean"
+#         # ---------------------------------------------------------
+#         # 🔥 STEP 3: DID YOU MEAN
+#         # ---------------------------------------------------------
+#         if len(final_fallback) < size and did_you_mean_results:
+#             remaining = size - len(final_fallback)
+#             final_fallback.extend(
+#                 [{"text": x["text"]} for x in did_you_mean_results[:remaining]]
+#             )
+#             fallback_type = "attribute_then_did_you_mean"
 
-        # ---------------------------------------------------------
-        # 🔥 STEP 4: BRANDS
-        # ---------------------------------------------------------
-        if len(final_fallback) < size:
-            popular_query = {
-                "size": 25,
-                "_source": ["brand_name"],
-                "query": {"match_all": {}},
-            }
+#         # ---------------------------------------------------------
+#         # 🔥 STEP 4: BRANDS
+#         # ---------------------------------------------------------
+#         if len(final_fallback) < size:
+#             popular_query = {
+#                 "size": 25,
+#                 "_source": ["brand_name"],
+#                 "query": {"match_all": {}},
+#             }
 
-            try:
-                pop_res = es.search(index=index_name, body=popular_query)
-                pop_hits = pop_res.get("hits", {}).get("hits", [])
+#             try:
+#                 pop_res = es.search(index=index_name, body=popular_query)
+#                 pop_hits = pop_res.get("hits", {}).get("hits", [])
 
-                seen_brands = set([x["text"] for x in final_fallback])
+#                 seen_brands = set([x["text"] for x in final_fallback])
 
-                for h in pop_hits:
-                    brand = (h["_source"].get("brand_name") or "").strip()
-                    if brand and brand not in seen_brands:
-                        final_fallback.append({"text": brand})
-                        seen_brands.add(brand)
+#                 for h in pop_hits:
+#                     brand = (h["_source"].get("brand_name") or "").strip()
+#                     if brand and brand not in seen_brands:
+#                         final_fallback.append({"text": brand})
+#                         seen_brands.add(brand)
 
-                    if len(final_fallback) >= size:
-                        break
-            except:
-                pass
+#                     if len(final_fallback) >= size:
+#                         break
+#             except:
+#                 pass
 
-            fallback_type = "final_brand_fallback"
+#             fallback_type = "final_brand_fallback"
 
-    return {
-        "success": True,
-        "query": q,
-        "primary_results": final_primary,
-        "fallback_results": final_fallback,
-        "fallback_type": fallback_type,
-    }
+#     return {
+#         "success": True,
+#         "query": q,
+#         "primary_results": final_primary,
+#         "fallback_results": final_fallback,
+#         "fallback_type": fallback_type,
+#     }
 
 
 from itertools import permutations
@@ -1510,186 +1510,186 @@ async def product_list_v7(
     }
 
 
-# from app.helpers import get_gemini_autocompletion
+from app.helpers import get_gemini_autocompletion
 
 
-# @router.get("/product/v6/auto-complete/")
-# async def get_product_auto_complete_v6(
-#     q: str = Query(..., min_length=1),
-#     size: int = 10,
-#     es: Elasticsearch = Depends(get_es),
-# ):
-#     print("\n" + "=" * 60)
-#     print(f"🔍 Incoming Query: {q}")
+@router.get("/product/v6/auto-complete/")
+async def get_product_auto_complete_v6(
+    q: str = Query(..., min_length=1),
+    size: int = 10,
+    es: Elasticsearch = Depends(get_es),
+):
+    print("\n" + "=" * 60)
+    print(f"🔍 Incoming Query: {q}")
 
-#     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
-#     q_clean = clean_text(q)
+    index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+    q_clean = clean_text(q)
 
-#     print(f"🧹 Cleaned Query: {q_clean}")
+    print(f"🧹 Cleaned Query: {q_clean}")
 
-#     if not q_clean:
-#         print("⚠️ Empty query after cleaning")
-#         return {
-#             "success": True,
-#             "query": q,
-#             "primary_results": [],
-#             "fallback_results": [],
-#         }
+    if not q_clean:
+        print("⚠️ Empty query after cleaning")
+        return {
+            "success": True,
+            "query": q,
+            "primary_results": [],
+            "fallback_results": [],
+        }
 
-#     # ---------------------------------------------------------
-#     # 🔹 1. SKU / MPN MATCH
-#     # ---------------------------------------------------------
-#     print("\n🚀 STEP 1: SKU / MPN MATCH")
+    # ---------------------------------------------------------
+    # 🔹 1. SKU / MPN MATCH
+    # ---------------------------------------------------------
+    print("\n🚀 STEP 1: SKU / MPN MATCH")
 
-#     sku_query = {
-#         "size": size,
-#         "_source": ["product_name"],
-#         "query": {
-#             "bool": {
-#                 "should": [
-#                     {"term": {"sku.keyword": q_clean}},
-#                     {"term": {"mpn.keyword": q_clean}},
-#                 ]
-#             }
-#         },
-#     }
+    sku_query = {
+        "size": size,
+        "_source": ["product_name"],
+        "query": {
+            "bool": {
+                "should": [
+                    {"term": {"sku.keyword": q_clean}},
+                    {"term": {"mpn.keyword": q_clean}},
+                ]
+            }
+        },
+    }
 
-#     print("📦 SKU Query:", sku_query)
+    print("📦 SKU Query:", sku_query)
 
-#     try:
-#         sku_res = es.search(index=index_name, body=sku_query)
-#         sku_hits = sku_res.get("hits", {}).get("hits", [])
+    try:
+        sku_res = es.search(index=index_name, body=sku_query)
+        sku_hits = sku_res.get("hits", {}).get("hits", [])
 
-#         print(f"📊 SKU Hits Count: {len(sku_hits)}")
+        print(f"📊 SKU Hits Count: {len(sku_hits)}")
 
-#         if sku_hits:
-#             print("✅ SKU/MPN match found! Returning early.")
+        if sku_hits:
+            print("✅ SKU/MPN match found! Returning early.")
 
-#             results = [
-#                 {"text": h["_source"]["product_name"]}
-#                 for h in sku_hits
-#                 if h["_source"].get("product_name")
-#             ]
+            results = [
+                {"text": h["_source"]["product_name"]}
+                for h in sku_hits
+                if h["_source"].get("product_name")
+            ]
 
-#             print("🎯 Results:", results)
+            print("🎯 Results:", results)
 
-#             return {
-#                 "success": True,
-#                 "query": q,
-#                 "primary_results": results,
-#                 "fallback_results": [],
-#                 "fallback_type": "sku_mpn_match",
-#             }
+            return {
+                "success": True,
+                "query": q,
+                "primary_results": results,
+                "fallback_results": [],
+                "fallback_type": "sku_mpn_match",
+            }
 
-#     except Exception as e:
-#         print("❌ SKU Query Failed:", str(e))
+    except Exception as e:
+        print("❌ SKU Query Failed:", str(e))
 
-#     # ---------------------------------------------------------
-#     # 🔹 2. SIMPLE SEARCH
-#     # ---------------------------------------------------------
-#     print("\n🔎 STEP 2: SIMPLE SEARCH")
+    # ---------------------------------------------------------
+    # 🔹 2. SIMPLE SEARCH
+    # ---------------------------------------------------------
+    print("\n🔎 STEP 2: SIMPLE SEARCH")
 
-#     simple_query = {
-#         "size": 50,
-#         "_source": ["product_name", "brand", "category", "product_type"],
-#         "query": {
-#             "multi_match": {
-#                 "query": q_clean,
-#                 "fields": [
-#                     "product_name^5",
-#                     "brand^3",
-#                     "category^2",
-#                     "product_type^2",
-#                 ],
-#                 "fuzziness": "AUTO",
-#             }
-#         },
-#     }
+    simple_query = {
+        "size": 50,
+        "_source": ["product_name", "brand", "category", "product_type"],
+        "query": {
+            "multi_match": {
+                "query": q_clean,
+                "fields": [
+                    "product_name^5",
+                    "brand^3",
+                    "category^2",
+                    "product_type^2",
+                ],
+                "fuzziness": "AUTO",
+            }
+        },
+    }
 
-#     print("📦 Simple Query:", simple_query)
+    print("📦 Simple Query:", simple_query)
 
-#     primary_results = []
-#     seen = set()
+    primary_results = []
+    seen = set()
 
-#     try:
-#         res = es.search(index=index_name, body=simple_query)
-#         hits = res.get("hits", {}).get("hits", [])
+    try:
+        res = es.search(index=index_name, body=simple_query)
+        hits = res.get("hits", {}).get("hits", [])
 
-#         print(f"📊 Simple Search Hits: {len(hits)}")
+        print(f"📊 Simple Search Hits: {len(hits)}")
 
-#         for idx, h in enumerate(hits):
-#             src = h.get("_source", {}) or {}
+        for idx, h in enumerate(hits):
+            src = h.get("_source", {}) or {}
 
-#             pname = clean_text(src.get("product_name"))
-#             brand = clean_text(src.get("brand"))
-#             category = clean_text(src.get("category"))
-#             ptype = clean_text(src.get("product_type"))
+            pname = clean_text(src.get("product_name"))
+            brand = clean_text(src.get("brand"))
+            category = clean_text(src.get("category"))
+            ptype = clean_text(src.get("product_type"))
 
-#             print(f"\n➡️ Hit {idx + 1}:")
-#             print("   product_name:", pname)
-#             print("   brand:", brand)
-#             print("   category:", category)
-#             print("   product_type:", ptype)
+            print(f"\n➡️ Hit {idx + 1}:")
+            print("   product_name:", pname)
+            print("   brand:", brand)
+            print("   category:", category)
+            print("   product_type:", ptype)
 
-#             for val in [pname, brand, category, ptype]:
-#                 if val and val not in seen:
-#                     primary_results.append({"text": val})
-#                     seen.add(val)
+            for val in [pname, brand, category, ptype]:
+                if val and val not in seen:
+                    primary_results.append({"text": val})
+                    seen.add(val)
 
-#                     print(f"   ✅ Added: {val}")
+                    print(f"   ✅ Added: {val}")
 
-#                 if len(primary_results) >= size:
-#                     print("⚡ Reached size limit")
-#                     break
+                if len(primary_results) >= size:
+                    print("⚡ Reached size limit")
+                    break
 
-#             if len(primary_results) >= size:
-#                 break
+            if len(primary_results) >= size:
+                break
 
-#     except Exception as e:
-#         print("❌ Simple Search Failed:", str(e))
+    except Exception as e:
+        print("❌ Simple Search Failed:", str(e))
 
-#     # ---------------------------------------------------------
-#     # 🔹 3. GEMINI FALLBACK
-#     # ---------------------------------------------------------
-#     print("\n🤖 STEP 3: GEMINI FALLBACK")
+    # ---------------------------------------------------------
+    # 🔹 3. GEMINI FALLBACK
+    # ---------------------------------------------------------
+    print("\n🤖 STEP 3: GEMINI FALLBACK")
 
-#     if len(primary_results) < size:
-#         print("⚠️ Not enough results, calling Gemini...")
+    if len(primary_results) < size:
+        print("⚠️ Not enough results, calling Gemini...")
 
-#         try:
-#             gemini_suggestions = get_gemini_autocompletion(q_clean)
+        try:
+            gemini_suggestions = get_gemini_autocompletion(q_clean)
 
-#             print("✨ Gemini Suggestions:", gemini_suggestions)
+            print("✨ Gemini Suggestions:", gemini_suggestions)
 
-#             for g in gemini_suggestions:
-#                 g_clean = clean_text(g)
+            for g in gemini_suggestions:
+                g_clean = clean_text(g)
 
-#                 if g_clean and g_clean not in seen:
-#                     primary_results.append({"text": g_clean})
-#                     seen.add(g_clean)
+                if g_clean and g_clean not in seen:
+                    primary_results.append({"text": g_clean})
+                    seen.add(g_clean)
 
-#                     print(f"   ✅ Added Gemini: {g_clean}")
+                    print(f"   ✅ Added Gemini: {g_clean}")
 
-#                 if len(primary_results) >= size:
-#                     print("⚡ Reached size limit (Gemini)")
-#                     break
+                if len(primary_results) >= size:
+                    print("⚡ Reached size limit (Gemini)")
+                    break
 
-#         except Exception as e:
-#             print("❌ Gemini Failed:", str(e))
-#     else:
-#         print("✅ Enough results from ES, skipping Gemini")
+        except Exception as e:
+            print("❌ Gemini Failed:", str(e))
+    else:
+        print("✅ Enough results from ES, skipping Gemini")
 
-#     # ---------------------------------------------------------
-#     # 🔹 FINAL RESPONSE
-#     # ---------------------------------------------------------
-#     print("\n📦 FINAL RESULTS:")
-#     print(primary_results[:size])
-#     print("=" * 60 + "\n")
+    # ---------------------------------------------------------
+    # 🔹 FINAL RESPONSE
+    # ---------------------------------------------------------
+    print("\n📦 FINAL RESULTS:")
+    print(primary_results[:size])
+    print("=" * 60 + "\n")
 
-#     return {
-#         "success": True,
-#         "query": q,
-#         "primary_results": primary_results[:size],
-#         "fallback_results": [],
-#         "fallback_type": None if primary_results else "gemini_only",
-#     }
+    return {
+        "success": True,
+        "query": q,
+        "primary_results": primary_results[:size],
+        "fallback_results": [],
+        "fallback_type": None if primary_results else "gemini_only",
+    }
