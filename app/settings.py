@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     debug: bool = False
     qdrant_url: str
     qdrant_api_key: str
+    gemini_api_key: str
 
     class Config:
         env_file = ".env"
