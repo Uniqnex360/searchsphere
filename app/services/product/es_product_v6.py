@@ -1,5 +1,6 @@
 import re
 import time
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import streaming_bulk
@@ -386,11 +387,22 @@ async def get_product_list_v6(
     elif sort_by == "category":
         add_sort(es_sort, "category", sort_order)
     elif sort_by == "search_popularity":
-        es_sort.append({"search_popularity": {"order": sort_order, "missing": "_last"}})
+        es_sort.append({"search_popularity": {"order": sort_order, "missing": 0}})
     elif sort_by == "base_price":
         es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
+    elif sort_by == "review":
+        es_sort.append({"review": {"order": sort_order, "missing": "_last"}})
+    elif sort_by == "created_at":
+        es_sort.append({"created_at": {"order": sort_order, "missing": "_last"}})
     else:
         es_sort.append({"_score": {"order": sort_order}})
+
+    if sort_by == "created_at":
+        cutoff_date = datetime.utcnow() - timedelta(days=2)
+
+        if sort_order == "desc":
+            # 🔥 Only last 2 days products
+            filters.append({"range": {"created_at": {"gte": cutoff_date.isoformat()}}})
 
     es_sort.append({"search_popularity": {"order": "desc", "missing": "_last"}})
 
@@ -412,6 +424,8 @@ async def get_product_list_v6(
             "suggest",
             "view_count",
             "search_popularity",
+            "review",
+            "created_at",
         ],
         "aggs": {
             "all_docs_count": {"global": {}},
@@ -523,6 +537,8 @@ async def get_product_list_v6(
                 "view_count": source.get("view_count", 0),
                 "search_popularity": source.get("search_popularity", 0),
                 "base_price": source.get("base_price"),
+                "review": source.get("review"),
+                "created_at": source.get("created_at"),
                 "images": [
                     i.get("url")
                     for i in source.get("images", [])

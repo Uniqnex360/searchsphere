@@ -60,6 +60,8 @@ class Product(BaseModel, table=True):
     hazardous_material: Optional[str] = None
     prop65_warning: Optional[str] = None
 
+    review: Optional[float] = None
+
     # FK
     industry_id: Optional[int] = Field(default=None, foreign_key="industry.id")
     category_id: int = Field(foreign_key="category.id")
