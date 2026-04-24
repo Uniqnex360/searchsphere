@@ -133,6 +133,34 @@ def add_sort(es_sort, field, sort_order):
     )
 
 
+import time
+import re
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
+from elasticsearch import Elasticsearch
+
+
+# --- REQUIRED HELPER FUNCTION ---
+def add_sort(es_sort, field, sort_order):
+    field_key = f"{field}.keyword"
+    # Sort to push empty/null values to the end
+    es_sort.append(
+        {
+            "_script": {
+                "type": "number",
+                "order": "asc",
+                "script": {
+                    "lang": "painless",
+                    "source": f"doc['{field_key}'].size() == 0 ? 1 : 0",
+                },
+            }
+        }
+    )
+    # Actual alphabetical sort
+    es_sort.append({field_key: {"order": sort_order, "unmapped_type": "keyword"}})
+
+
+# --- MAIN FUNCTION ---
 async def get_product_list_v6(
     es: Elasticsearch,
     query: str = None,
@@ -407,9 +435,7 @@ async def get_product_list_v6(
 
     if sort_by == "created_at":
         cutoff_date = datetime.utcnow() - timedelta(days=2)
-
         if sort_order == "desc":
-            # 🔥 Only last 2 days products
             filters.append({"range": {"created_at": {"gte": cutoff_date.isoformat()}}})
 
     es_sort.append({"search_popularity": {"order": "desc", "missing": "_last"}})
@@ -495,24 +521,30 @@ async def get_product_list_v6(
     }
 
     start_network = time.perf_counter()
-    resp = es.search(index=index, body=body)
+    # Executing the primary search
+    resp = await es.search(index=index, body=body)
 
-    # FULL IDS (safe)
+    # Store first response for results and facets
+    first_resp = resp
+
+    # START FULL IDS LOGIC
     all_ids = [hit["_id"] for hit in resp["hits"]["hits"]]
 
     search_after = None
     if resp["hits"]["hits"] and "sort" in resp["hits"]["hits"][-1]:
         search_after = resp["hits"]["hits"][-1]["sort"]
 
+    # Remove 'from' as search_after cannot use it
     body.pop("from", None)
 
-    first_resp = resp  # IMPORTANT FIX
+    # We only want IDs in the background loop to save memory/speed
+    body["_source"] = False
 
     while search_after:
         body["search_after"] = search_after
         body["size"] = 5000
 
-        resp = es.search(index=index, body=body)
+        resp = await es.search(index=index, body=body)
         hits = resp["hits"]["hits"]
 
         if not hits:
@@ -524,6 +556,7 @@ async def get_product_list_v6(
             search_after = hits[-1]["sort"]
         else:
             break
+    # END FULL IDS LOGIC
 
     total_hits = first_resp.get("hits", {}).get("total", {}).get("value", 0)
     total_docs = (
