@@ -387,7 +387,15 @@ async def get_product_list_v6(
     elif sort_by == "category":
         add_sort(es_sort, "category", sort_order)
     elif sort_by == "search_popularity":
-        es_sort.append({"search_popularity": {"order": sort_order, "missing": 0}})
+        es_sort.append(
+            {
+                "search_popularity": {
+                    "order": sort_order,
+                    "unmapped_type": "long",
+                    "missing": 0,
+                }
+            }
+        )
     elif sort_by == "base_price":
         es_sort.append({"base_price": {"order": sort_order, "missing": "_last"}})
     elif sort_by == "review":
