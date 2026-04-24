@@ -1508,3 +1508,188 @@ async def product_list_v7(
             "dynamic_attributes": dynamic_facets,
         },
     }
+
+
+# from app.helpers import get_gemini_autocompletion
+
+
+# @router.get("/product/v6/auto-complete/")
+# async def get_product_auto_complete_v6(
+#     q: str = Query(..., min_length=1),
+#     size: int = 10,
+#     es: Elasticsearch = Depends(get_es),
+# ):
+#     print("\n" + "=" * 60)
+#     print(f"🔍 Incoming Query: {q}")
+
+#     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+#     q_clean = clean_text(q)
+
+#     print(f"🧹 Cleaned Query: {q_clean}")
+
+#     if not q_clean:
+#         print("⚠️ Empty query after cleaning")
+#         return {
+#             "success": True,
+#             "query": q,
+#             "primary_results": [],
+#             "fallback_results": [],
+#         }
+
+#     # ---------------------------------------------------------
+#     # 🔹 1. SKU / MPN MATCH
+#     # ---------------------------------------------------------
+#     print("\n🚀 STEP 1: SKU / MPN MATCH")
+
+#     sku_query = {
+#         "size": size,
+#         "_source": ["product_name"],
+#         "query": {
+#             "bool": {
+#                 "should": [
+#                     {"term": {"sku.keyword": q_clean}},
+#                     {"term": {"mpn.keyword": q_clean}},
+#                 ]
+#             }
+#         },
+#     }
+
+#     print("📦 SKU Query:", sku_query)
+
+#     try:
+#         sku_res = es.search(index=index_name, body=sku_query)
+#         sku_hits = sku_res.get("hits", {}).get("hits", [])
+
+#         print(f"📊 SKU Hits Count: {len(sku_hits)}")
+
+#         if sku_hits:
+#             print("✅ SKU/MPN match found! Returning early.")
+
+#             results = [
+#                 {"text": h["_source"]["product_name"]}
+#                 for h in sku_hits
+#                 if h["_source"].get("product_name")
+#             ]
+
+#             print("🎯 Results:", results)
+
+#             return {
+#                 "success": True,
+#                 "query": q,
+#                 "primary_results": results,
+#                 "fallback_results": [],
+#                 "fallback_type": "sku_mpn_match",
+#             }
+
+#     except Exception as e:
+#         print("❌ SKU Query Failed:", str(e))
+
+#     # ---------------------------------------------------------
+#     # 🔹 2. SIMPLE SEARCH
+#     # ---------------------------------------------------------
+#     print("\n🔎 STEP 2: SIMPLE SEARCH")
+
+#     simple_query = {
+#         "size": 50,
+#         "_source": ["product_name", "brand", "category", "product_type"],
+#         "query": {
+#             "multi_match": {
+#                 "query": q_clean,
+#                 "fields": [
+#                     "product_name^5",
+#                     "brand^3",
+#                     "category^2",
+#                     "product_type^2",
+#                 ],
+#                 "fuzziness": "AUTO",
+#             }
+#         },
+#     }
+
+#     print("📦 Simple Query:", simple_query)
+
+#     primary_results = []
+#     seen = set()
+
+#     try:
+#         res = es.search(index=index_name, body=simple_query)
+#         hits = res.get("hits", {}).get("hits", [])
+
+#         print(f"📊 Simple Search Hits: {len(hits)}")
+
+#         for idx, h in enumerate(hits):
+#             src = h.get("_source", {}) or {}
+
+#             pname = clean_text(src.get("product_name"))
+#             brand = clean_text(src.get("brand"))
+#             category = clean_text(src.get("category"))
+#             ptype = clean_text(src.get("product_type"))
+
+#             print(f"\n➡️ Hit {idx + 1}:")
+#             print("   product_name:", pname)
+#             print("   brand:", brand)
+#             print("   category:", category)
+#             print("   product_type:", ptype)
+
+#             for val in [pname, brand, category, ptype]:
+#                 if val and val not in seen:
+#                     primary_results.append({"text": val})
+#                     seen.add(val)
+
+#                     print(f"   ✅ Added: {val}")
+
+#                 if len(primary_results) >= size:
+#                     print("⚡ Reached size limit")
+#                     break
+
+#             if len(primary_results) >= size:
+#                 break
+
+#     except Exception as e:
+#         print("❌ Simple Search Failed:", str(e))
+
+#     # ---------------------------------------------------------
+#     # 🔹 3. GEMINI FALLBACK
+#     # ---------------------------------------------------------
+#     print("\n🤖 STEP 3: GEMINI FALLBACK")
+
+#     if len(primary_results) < size:
+#         print("⚠️ Not enough results, calling Gemini...")
+
+#         try:
+#             gemini_suggestions = get_gemini_autocompletion(q_clean)
+
+#             print("✨ Gemini Suggestions:", gemini_suggestions)
+
+#             for g in gemini_suggestions:
+#                 g_clean = clean_text(g)
+
+#                 if g_clean and g_clean not in seen:
+#                     primary_results.append({"text": g_clean})
+#                     seen.add(g_clean)
+
+#                     print(f"   ✅ Added Gemini: {g_clean}")
+
+#                 if len(primary_results) >= size:
+#                     print("⚡ Reached size limit (Gemini)")
+#                     break
+
+#         except Exception as e:
+#             print("❌ Gemini Failed:", str(e))
+#     else:
+#         print("✅ Enough results from ES, skipping Gemini")
+
+#     # ---------------------------------------------------------
+#     # 🔹 FINAL RESPONSE
+#     # ---------------------------------------------------------
+#     print("\n📦 FINAL RESULTS:")
+#     print(primary_results[:size])
+#     print("=" * 60 + "\n")
+
+#     return {
+#         "success": True,
+#         "query": q,
+#         "primary_results": primary_results[:size],
+#         "fallback_results": [],
+#         "fallback_type": None if primary_results else "gemini_only",
+#     }
