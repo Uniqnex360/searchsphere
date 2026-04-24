@@ -201,15 +201,18 @@ def handle_category(
     return category_cache
 
 
+from datetime import datetime
+from elasticsearch.helpers import streaming_bulk
+from elasticsearch import Elasticsearch
+
 
 def sync_product_suggest_data_es(
     es: Elasticsearch,
-    products: list[Product],
+    products: list,
     autosuggest_index: str,
     product_index: str,
     batch_size: int = 30,
 ) -> dict:
-
 
     offset = 0
     total_processed = 0
@@ -250,7 +253,7 @@ def sync_product_suggest_data_es(
             elif result == "noop":
                 noop += 1
 
-        # Retry failed actions once
+        # Retry once
         if failed_actions:
             print(f"🔄 Retrying {len(failed_actions)} failed actions...")
             for ok, item in streaming_bulk(es, (i.copy() for i in failed_actions)):
@@ -272,7 +275,7 @@ def sync_product_suggest_data_es(
         return created, updated, noop, failed
 
     # ======================
-    # MAIN LOOP (FROM INPUT LIST)
+    # MAIN LOOP
     # ======================
     total_batches = (len(products) + batch_size - 1) // batch_size
 
@@ -300,6 +303,8 @@ def sync_product_suggest_data_es(
             videos = product.videos or []
             documents = product.documents or []
 
+            now = datetime.utcnow()
+
             # --------------------
             # Product payload
             # --------------------
@@ -325,6 +330,7 @@ def sync_product_suggest_data_es(
                 "length": product.length or 0,
                 "width": product.width or 0,
                 "height": product.height or 0,
+                "review": float(product.review) or 0,
                 "base_price": product.base_price or 0,
                 "sale_price": product.sale_price or 0,
                 "selling_price": product.selling_price or 0,
@@ -360,7 +366,7 @@ def sync_product_suggest_data_es(
             }
 
             # --------------------
-            # Suggestions payload (same logic)
+            # Suggestions
             # --------------------
             brand_name = brand.brand_name or ""
             category_name = category.name if category else ""
@@ -416,13 +422,36 @@ def sync_product_suggest_data_es(
             )
 
             # --------------------
-            # PRODUCT INDEX
+            # PRODUCT INDEX (FIXED)
             # --------------------
             product_actions.append(
                 {
-                    "_op_type": "index",
+                    "_op_type": "update",
                     "_id": product.id,
-                    "_source": {
+                    "script": {
+                        "source": """
+                            if (ctx._source.created_at == null) {
+                                ctx._source.created_at = params.created_at;
+                            }
+                            ctx._source.updated_at = params.updated_at;
+
+                            for (entry in params.doc.entrySet()) {
+                                ctx._source[entry.getKey()] = entry.getValue();
+                            }
+                        """,
+                        "params": {
+                            "created_at": product.created_at,
+                            "updated_at": now,
+                            "doc": {
+                                "brand": brand_name,
+                                "suggest": list(suggest_set),
+                                **data,
+                            },
+                        },
+                    },
+                    "upsert": {
+                        "created_at": product.created_at,
+                        "updated_at": now,
                         "brand": brand_name,
                         "suggest": list(suggest_set),
                         **data,
@@ -593,6 +622,7 @@ def import_products_task(self, file_path: str, obj_id: int):
                     "safety_standard",
                     "hazardous_material",
                     "prop65_warning",
+                    "review",
                 ]:
                     setattr(product, field, row_dict.get(field))
 
@@ -721,7 +751,7 @@ def import_products_task(self, file_path: str, obj_id: int):
 
             sync_product_suggest_data_es(
                 es,
-                 [p for p, _ in products_for_bg_task],
+                [p for p, _ in products_for_bg_task],
                 ESCollection.PRODUCT_AUTO_SUGGEST_V7.value,
                 ESCollection.PRODUCT_V7.value,
             )
