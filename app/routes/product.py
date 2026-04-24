@@ -198,7 +198,7 @@ async def save_search_result(
     query_data: dict,
     data: dict,
     url: str,
-    product_ids: list[int],
+    product_ids: list[int] = [],
     debug: bool = True,
 ):
     query = (query_data.get("q") or "").strip()
