@@ -713,7 +713,7 @@ async def product_list_v6(
         "filters": filters,
         "page": page,
     }
-    product_ids = data.pop("product_ids")
+    # product_ids = data.pop("product_ids")
     # 4. Background Tasks
     background_tasks.add_task(
         save_search_result,
@@ -722,14 +722,14 @@ async def product_list_v6(
         query_payload,
         data,
         request.headers.get("X-FE-URL", str(request.url)),
-        product_ids=product_ids,
+        # product_ids=product_ids,
     )
 
-    if q:
-        product_ids = [item["id"] for item in data.get("results", [])]
-        background_tasks.add_task(
-            increment_search_popularity, es, ESCollection.PRODUCT_V7.value, product_ids
-        )
+    # if q:
+    #     product_ids = [item["id"] for item in data.get("results", [])]
+    #     background_tasks.add_task(
+    #         increment_search_popularity, es, ESCollection.PRODUCT_V7.value, product_ids
+    #     )
 
     total_duration = time.perf_counter() - start_total
     print(f"Timing - Total Request v6: {total_duration:.4f}s")
