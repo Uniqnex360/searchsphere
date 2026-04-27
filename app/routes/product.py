@@ -7,8 +7,9 @@ from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func, desc
 from sqlalchemy.orm import selectinload, joinedload
-from sqlalchemy import select, func, desc, asc, cast, String, case, and_
+from sqlalchemy import select, func, desc, asc, cast, String, case, and_, Text
 from sqlalchemy.sql.sqltypes import String
+from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 
 from fastapi import APIRouter, Depends, Query, BackgroundTasks, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -472,21 +473,45 @@ async def get_product_search_keywords_list(
     search_q = request.query_params.get("search")
     result_type = request.query_params.get("result_type", "all")
 
-    # 👉 NEW DATE FILTERS
+    brands = request.query_params.getlist("brand[]")
+    categories = request.query_params.getlist("category[]")
+    product_types = request.query_params.getlist("product_type[]")
+
     start_date_str = request.query_params.get("start_date")
     end_date_str = request.query_params.get("end_date")
 
-    date_filters = []
+    filters = []
 
+    # Handle Date Filters
     if start_date_str:
         start_dt = datetime.fromisoformat(start_date_str)
         start_dt, _ = get_day_range(start_dt)
-        date_filters.append(ProductSearchResult.created_at >= start_dt)
+        filters.append(ProductSearchResult.created_at >= start_dt)
 
     if end_date_str:
         end_dt = datetime.fromisoformat(end_date_str)
         _, end_dt = get_day_range(end_dt)
-        date_filters.append(ProductSearchResult.created_at <= end_dt)
+        filters.append(ProductSearchResult.created_at <= end_dt)
+
+    # 🔥 FIX: Cast JSON to JSONB and use ARRAY of TEXT for the operator ?|
+    if brands:
+        filters.append(
+            cast(ProductSearchResult.brand, JSONB).op("?|")(cast(brands, ARRAY(Text)))
+        )
+
+    if categories:
+        filters.append(
+            cast(ProductSearchResult.category, JSONB).op("?|")(
+                cast(categories, ARRAY(Text))
+            )
+        )
+
+    if product_types:
+        filters.append(
+            cast(ProductSearchResult.product_type, JSONB).op("?|")(
+                cast(product_types, ARRAY(Text))
+            )
+        )
 
     # -------------------------
     # Keyword extraction
@@ -494,25 +519,19 @@ async def get_product_search_keywords_list(
     keyword_col = func.lower(cast(ProductSearchResult.query["q"], String))
 
     # =========================================================
-    # 1. BASE QUERY (GROUPED)
+    # BASE QUERY
     # =========================================================
-    base_query = (
-        select(
-            keyword_col.label("q"),
-            ProductSearchResult.total_result.label("total_result"),
-            func.count().label("search_count"),
-            # ✅ We take the MAX date for each grouped keyword
-            func.max(ProductSearchResult.created_at).label("created_at"),
-            func.max(ProductSearchResult.url).label("url"),
-            func.max(ProductSearchResult.id).label("id"),
-        )
-        .where(ProductSearchResult.is_active == True)
-        .order_by("created_at")
-    )
+    base_query = select(
+        keyword_col.label("q"),
+        ProductSearchResult.total_result.label("total_result"),
+        func.count().label("search_count"),
+        func.max(ProductSearchResult.created_at).label("created_at"),
+        func.max(ProductSearchResult.url).label("url"),
+        func.max(ProductSearchResult.id).label("id"),
+    ).where(ProductSearchResult.is_active == True)
 
-    # 👉 Apply date filters
-    if date_filters:
-        base_query = base_query.where(and_(*date_filters))
+    if filters:
+        base_query = base_query.where(and_(*filters))
 
     if search_q:
         base_query = base_query.where(keyword_col.ilike(f"%{search_q}%"))
@@ -531,65 +550,41 @@ async def get_product_search_keywords_list(
     cols = subquery.c
 
     # =========================================================
-    # 2. UNIQUE COUNT
+    # COUNTS
     # =========================================================
-    unique_count_query = select(func.count()).select_from(subquery)
-    unique_count = (await db.exec(unique_count_query)).scalar()
+    unique_count_res = await db.execute(select(func.count()).select_from(subquery))
+    unique_count = unique_count_res.scalar() or 0
 
-    # =========================================================
-    # 3. TOTAL COUNT (RAW)
-    # =========================================================
-    total_count_query = (
-        select(func.count())
-        .select_from(ProductSearchResult)
-        .where(ProductSearchResult.is_active == True)
+    total_count_query = select(func.count()).where(
+        ProductSearchResult.is_active == True
     )
 
-    if date_filters:
-        total_count_query = total_count_query.where(and_(*date_filters))
+    if filters:
+        total_count_query = total_count_query.where(and_(*filters))
 
-    if search_q:
-        total_count_query = total_count_query.where(keyword_col.ilike(f"%{search_q}%"))
-
-    if result_type == "zero":
-        total_count_query = total_count_query.where(
-            ProductSearchResult.total_result == 0
-        )
-    elif result_type == "non_zero":
-        total_count_query = total_count_query.where(
-            ProductSearchResult.total_result > 0
-        )
-
-    total_count = (await db.exec(total_count_query)).scalar()
+    total_count_res = await db.execute(total_count_query)
+    total_count = total_count_res.scalar() or 0
 
     # =========================================================
-    # 4. SORTING
+    # SORTING
     # =========================================================
     sort_column_map = {
         "q": cols.q,
         "total_result": cols.total_result,
         "search_count": cols.search_count,
-        "created_at": cols.created_at,  # This refers to the max date from the subquery
+        "created_at": cols.created_at,
     }
 
     sort_column = sort_column_map.get(sort_by, cols.created_at)
 
-    if sort_by == "q":
-        empty_last = case((cols.q == "", 1), else_=0)
-        order_expressions = (
-            [empty_last.asc(), cols.q.asc()]
-            if order == "asc"
-            else [empty_last.asc(), cols.q.desc()]
-        )
-    else:
-        order_expressions = (
-            [asc(sort_column).nulls_last()]
-            if order == "asc"
-            else [desc(sort_column).nulls_last()]
-        )
+    order_expressions = (
+        [asc(sort_column).nulls_last()]
+        if order == "asc"
+        else [desc(sort_column).nulls_last()]
+    )
 
     # =========================================================
-    # 5. DATA QUERY
+    # DATA QUERY
     # =========================================================
     final_query = (
         select(
@@ -598,14 +593,14 @@ async def get_product_search_keywords_list(
             cols.total_result,
             cols.url,
             cols.search_count,
-            cols.created_at,  # This is the MAX(created_at)
+            cols.created_at,
         )
         .order_by(*order_expressions)
         .offset(offset)
         .limit(limit)
     )
 
-    rows = (await db.exec(final_query)).all()
+    rows = (await db.execute(final_query)).all()
 
     data = [
         {
@@ -620,8 +615,38 @@ async def get_product_search_keywords_list(
     ]
 
     # =========================================================
-    # RESPONSE
+    # FACETS
     # =========================================================
+    async def get_flat_facet(field):
+        query = select(field).where(ProductSearchResult.is_active == True)
+        if filters:
+            query = query.where(and_(*filters))
+
+        result = await db.execute(query)
+        values = [r[0] for r in result if r[0] is not None]
+        flat = []
+
+        for v in values:
+            if isinstance(v, list):
+                for item in v:
+                    if item:
+                        if isinstance(item, str) and "," in item:
+                            flat.extend(
+                                [x.strip() for x in item.split(",") if x.strip()]
+                            )
+                        else:
+                            flat.append(str(item).strip())
+            elif isinstance(v, str):
+                flat.extend([x.strip() for x in v.split(",") if x.strip()])
+
+        return sorted(set(flat), key=lambda x: x.lower())
+
+    facets = {
+        "brand": await get_flat_facet(ProductSearchResult.brand),
+        "category": await get_flat_facet(ProductSearchResult.category),
+        "product_type": await get_flat_facet(ProductSearchResult.product_type),
+    }
+
     return {
         "data": data,
         "meta": {
@@ -629,7 +654,8 @@ async def get_product_search_keywords_list(
             "limit": limit,
             "total": total_count,
             "unique": unique_count,
-            "pages": (unique_count + limit - 1) // limit,
+            "pages": (unique_count + limit - 1) // limit if limit > 0 else 1,
+            "facets": facets,
         },
     }
 
@@ -659,7 +685,7 @@ async def product_list_v6(
     sort_by: str | None = None,
     sort_order: str = "desc",
     page: int = 1,
-    end_date: Optional[datetime] = Query(None)
+    end_date: Optional[datetime] = Query(None),
 ):
 
     start_total = time.perf_counter()
