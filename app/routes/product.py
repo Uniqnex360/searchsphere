@@ -1,6 +1,7 @@
 import re
 import time
 from typing import Optional, List, Dict
+from itertools import permutations
 from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -17,6 +18,7 @@ from app.models import Product, Category, ProductSearchResult, Brand
 from app.services import (
     ESCollection,
     ElasticsearchService,
+    sync_products_to_es_v5,
     autocomplete_products,
     autocomplete_product_vector,
     autocomplete_with_es_qdrant,
@@ -32,6 +34,7 @@ from app.services import (
 from app.es_client import get_es
 from app.database import get_session
 from app.services import get_qdrant_client
+from app.helpers import get_gemini_autocompletion
 
 router = APIRouter()
 
@@ -117,9 +120,6 @@ async def get_product_filter_meta(db: AsyncSession = Depends(get_session)):
             current += step_size
 
     return {"brands": brands, "categories": categories, "price_ranges": price_ranges}
-
-
-import time
 
 
 @router.get("/product/detail/{id}/")
@@ -430,9 +430,6 @@ def get_pagination_params(request: Request):
     return page, limit
 
 
-from app.services import sync_products_to_es_v5
-
-
 @router.get("/product/sync/es/")
 async def sync_product_with_elastic_serch(
     session: AsyncSession = Depends(get_session),
@@ -499,15 +496,19 @@ async def get_product_search_keywords_list(
     # =========================================================
     # 1. BASE QUERY (GROUPED)
     # =========================================================
-    base_query = select(
-        keyword_col.label("q"),
-        ProductSearchResult.total_result.label("total_result"),
-        func.count().label("search_count"),
-        func.max(ProductSearchResult.created_at).label("created_at"),
-        func.max(ProductSearchResult.url).label("url"),
-        # ✅ ADDED: representative id per group
-        func.max(ProductSearchResult.id).label("id"),
-    ).where(ProductSearchResult.is_active == True)
+    base_query = (
+        select(
+            keyword_col.label("q"),
+            ProductSearchResult.total_result.label("total_result"),
+            func.count().label("search_count"),
+            # ✅ We take the MAX date for each grouped keyword
+            func.max(ProductSearchResult.created_at).label("created_at"),
+            func.max(ProductSearchResult.url).label("url"),
+            func.max(ProductSearchResult.id).label("id"),
+        )
+        .where(ProductSearchResult.is_active == True)
+        .order_by("created_at")
+    )
 
     # 👉 Apply date filters
     if date_filters:
@@ -568,7 +569,7 @@ async def get_product_search_keywords_list(
         "q": cols.q,
         "total_result": cols.total_result,
         "search_count": cols.search_count,
-        "created_at": cols.created_at,
+        "created_at": cols.created_at,  # This refers to the max date from the subquery
     }
 
     sort_column = sort_column_map.get(sort_by, cols.created_at)
@@ -592,12 +593,12 @@ async def get_product_search_keywords_list(
     # =========================================================
     final_query = (
         select(
-            cols.id,  # ✅ INCLUDED ID
+            cols.id,
             cols.q,
             cols.total_result,
             cols.url,
             cols.search_count,
-            cols.created_at,
+            cols.created_at,  # This is the MAX(created_at)
         )
         .order_by(*order_expressions)
         .offset(offset)
@@ -608,7 +609,7 @@ async def get_product_search_keywords_list(
 
     data = [
         {
-            "id": r.id,  # ✅ INCLUDED
+            "id": r.id,
             "q": r.q,
             "total_result": r.total_result,
             "url": r.url,
@@ -648,11 +649,9 @@ async def product_list_v6(
     request: Request,
     background_tasks: BackgroundTasks,
     q: str = "",
-    brand_: Optional[List[str]] = Query(
-        None, alias="brand"
-    ),  # Updated to match frontend params
-    product_type_: Optional[List[str]] = Query(None, alias="product_type"),
-    category_: Optional[List[str]] = Query(None, alias="category"),
+    brand_: Optional[List[str]] = Query(None, alias="brand[]"),
+    product_type_: Optional[List[str]] = Query(None, alias="product_type[]"),
+    category_: Optional[List[str]] = Query(None, alias="category[]"),
     price_min: Optional[float] = Query(None),
     price_max: Optional[float] = Query(None),
     es: Elasticsearch = Depends(get_es),
@@ -661,6 +660,7 @@ async def product_list_v6(
     sort_order: str = "desc",
     page: int = 1,
 ):
+    print("category", category_)
     start_total = time.perf_counter()
 
     # 1. Extract Dynamic Attribute Filters
@@ -1029,9 +1029,6 @@ def clean_text(text: str):
 #         "fallback_results": final_fallback,
 #         "fallback_type": fallback_type,
 #     }
-
-
-from itertools import permutations
 
 
 def build_suggestions_chain(brand=None, product_type=None, category=None):
@@ -1510,25 +1507,19 @@ async def product_list_v7(
     }
 
 
-from app.helpers import get_gemini_autocompletion
-
-
 @router.get("/product/v6/auto-complete/")
 async def get_product_auto_complete_v6(
     q: str = Query(..., min_length=1),
     size: int = 10,
     es: Elasticsearch = Depends(get_es),
 ):
-    print("\n" + "=" * 60)
-    print(f"🔍 Incoming Query: {q}")
+    print(f"\n🔍 Incoming Query: {q}")
 
     index_name = ESCollection.PRODUCT_AUTO_SUGGEST_V7.value
+    product_index = ESCollection.PRODUCT_V7.value
     q_clean = clean_text(q)
 
-    print(f"🧹 Cleaned Query: {q_clean}")
-
     if not q_clean:
-        print("⚠️ Empty query after cleaning")
         return {
             "success": True,
             "query": q,
@@ -1537,10 +1528,8 @@ async def get_product_auto_complete_v6(
         }
 
     # ---------------------------------------------------------
-    # 🔹 1. SKU / MPN MATCH
+    # 🔹 1. SKU / MPN MATCH (Early Exit)
     # ---------------------------------------------------------
-    print("\n🚀 STEP 1: SKU / MPN MATCH")
-
     sku_query = {
         "size": size,
         "_source": ["product_name"],
@@ -1554,142 +1543,195 @@ async def get_product_auto_complete_v6(
         },
     }
 
-    print("📦 SKU Query:", sku_query)
-
     try:
         sku_res = es.search(index=index_name, body=sku_query)
         sku_hits = sku_res.get("hits", {}).get("hits", [])
-
-        print(f"📊 SKU Hits Count: {len(sku_hits)}")
-
         if sku_hits:
-            print("✅ SKU/MPN match found! Returning early.")
-
             results = [
                 {"text": h["_source"]["product_name"]}
                 for h in sku_hits
                 if h["_source"].get("product_name")
             ]
-
-            print("🎯 Results:", results)
-
+            # ✅ CREDIT SAVED: Return immediately if SKU matches
             return {
                 "success": True,
                 "query": q,
                 "primary_results": results,
                 "fallback_results": [],
-                "fallback_type": "sku_mpn_match",
+                "fallback_type": "did_you_mean",
             }
-
     except Exception as e:
-        print("❌ SKU Query Failed:", str(e))
+        print(f"❌ SKU Query Failed: {e}")
 
     # ---------------------------------------------------------
-    # 🔹 2. SIMPLE SEARCH
+    # 🔹 2. MAIN BUCKET SEARCH
     # ---------------------------------------------------------
-    print("\n🔎 STEP 2: SIMPLE SEARCH")
-
-    simple_query = {
-        "size": 50,
-        "_source": ["product_name", "brand", "category", "product_type"],
+    search_query = {
+        "size": 100,
         "query": {
-            "multi_match": {
-                "query": q_clean,
-                "fields": [
-                    "product_name^5",
-                    "brand^3",
-                    "category^2",
-                    "product_type^2",
-                ],
-                "fuzziness": "AUTO",
+            "bool": {
+                "should": [
+                    {
+                        "multi_match": {
+                            "query": q_clean,
+                            "type": "bool_prefix",
+                            "fields": [
+                                "brand_category_product_type_attribute.autocomplete^25",
+                                "brand_category_product_type.autocomplete^15",
+                                "brand_category.autocomplete^10",
+                                "brand_name.autocomplete^5",
+                            ],
+                            "boost": 10,
+                        }
+                    },
+                    {
+                        "multi_match": {
+                            "query": q_clean,
+                            "fields": [
+                                "brand_category_product_type_attribute^10",
+                                "brand_category_product_type^5",
+                                "brand_name^10",
+                            ],
+                            "fuzziness": "AUTO",
+                            "prefix_length": 1,
+                        }
+                    },
+                ]
             }
         },
     }
 
-    print("📦 Simple Query:", simple_query)
-
     primary_results = []
+    did_you_mean_results = []
     seen = set()
+    q_words = q_clean.split()
+    core_prefix = q_clean[:3]
 
     try:
-        res = es.search(index=index_name, body=simple_query)
-        hits = res.get("hits", {}).get("hits", [])
+        response = es.search(index=index_name, body=search_query)
+        hits = response.get("hits", {}).get("hits", [])
 
-        print(f"📊 Simple Search Hits: {len(hits)}")
+        for hit in hits:
+            source = hit.get("_source", {}) or {}
+            score = hit.get("_score", 0)
+            fields = [
+                ("attr", source.get("brand_category_product_type_attribute"), 3),
+                ("type", source.get("brand_category_product_type"), 2),
+                ("cat", source.get("brand_category"), 2),
+                ("brand", source.get("brand_name"), 1),
+            ]
 
-        for idx, h in enumerate(hits):
-            src = h.get("_source", {}) or {}
+            for f_type, values, priority in fields:
+                if not values:
+                    continue
+                if isinstance(values, str):
+                    values = [values]
 
-            pname = clean_text(src.get("product_name"))
-            brand = clean_text(src.get("brand"))
-            category = clean_text(src.get("category"))
-            ptype = clean_text(src.get("product_type"))
+                for v in values:
+                    v_clean = clean_text(v)
+                    if not v_clean or v_clean in seen:
+                        continue
 
-            print(f"\n➡️ Hit {idx + 1}:")
-            print("   product_name:", pname)
-            print("   brand:", brand)
-            print("   category:", category)
-            print("   product_type:", ptype)
+                    is_exact = all(word in v_clean for word in q_words)
+                    is_brand = f_type == "brand"
+                    has_prefix = core_prefix in v_clean
 
-            for val in [pname, brand, category, ptype]:
-                if val and val not in seen:
-                    primary_results.append({"text": val})
-                    seen.add(val)
+                    entry = {"text": v_clean, "score": score, "priority": priority}
+                    if is_exact:
+                        primary_results.append(entry)
+                        seen.add(v_clean)
+                    elif score > 7.0 and (is_brand or has_prefix):
+                        did_you_mean_results.append(entry)
+                        seen.add(v_clean)
 
-                    print(f"   ✅ Added: {val}")
+        primary_results.sort(key=lambda x: (-x["priority"], -x["score"]))
+        did_you_mean_results.sort(key=lambda x: (-x["priority"], -x["score"]))
+    except Exception as e:
+        print(f"❌ Main Search Failed: {e}")
 
-                if len(primary_results) >= size:
-                    print("⚡ Reached size limit")
+    final_results = [{"text": x["text"]} for x in primary_results[:size]]
+
+    # ---------------------------------------------------------
+    # 🔹 3. ATTRIBUTE / PRODUCT NAME SEARCH (Conditional)
+    # ---------------------------------------------------------
+    # ✅ CREDIT SAVED: Only search Product Index if still have room
+    if len(final_results) < size:
+        attr_query = {
+            "size": 50,
+            "_source": ["product_name"],
+            "query": {
+                "bool": {
+                    "should": [
+                        {
+                            "match": {
+                                "attributes.value": {
+                                    "query": q_clean,
+                                    "operator": "and",
+                                }
+                            }
+                        },
+                        {
+                            "match": {
+                                "product_name": {
+                                    "query": q_clean,
+                                    "fuzziness": "AUTO",
+                                    "boost": 3,
+                                }
+                            }
+                        },
+                    ]
+                }
+            },
+        }
+        try:
+            attr_res = es.search(index=product_index, body=attr_query)
+            for h in attr_res.get("hits", {}).get("hits", []):
+                pname = clean_text(h["_source"].get("product_name"))
+                if pname and pname not in seen:
+                    final_results.append({"text": pname})
+                    seen.add(pname)
+                if len(final_results) >= size:
                     break
+        except:
+            pass
 
-            if len(primary_results) >= size:
+    # ---------------------------------------------------------
+    # 🔹 4. DID YOU MEAN / BRAND FALLBACK (Conditional)
+    # ---------------------------------------------------------
+    if len(final_results) < size and did_you_mean_results:
+        for dym in did_you_mean_results:
+            if dym["text"] not in seen:
+                final_results.append({"text": dym["text"]})
+                seen.add(dym["text"])
+            if len(final_results) >= size:
                 break
 
-    except Exception as e:
-        print("❌ Simple Search Failed:", str(e))
-
     # ---------------------------------------------------------
-    # 🔹 3. GEMINI FALLBACK
+    # 🔹 5. GEMINI FALLBACK
     # ---------------------------------------------------------
-    print("\n🤖 STEP 3: GEMINI FALLBACK")
-
-    if len(primary_results) < size:
-        print("⚠️ Not enough results, calling Gemini...")
-
+    fallback_type = None
+    # ✅ CREDIT SAVED: If we have reached the requested 'size', Gemini is NEVER called.
+    if len(final_results) < size:
+        print("🤖 ES Results insufficient, calling Gemini...")
         try:
             gemini_suggestions = get_gemini_autocompletion(q_clean)
-
-            print("✨ Gemini Suggestions:", gemini_suggestions)
-
             for g in gemini_suggestions:
                 g_clean = clean_text(g)
-
                 if g_clean and g_clean not in seen:
-                    primary_results.append({"text": g_clean})
+                    final_results.append({"text": g_clean})
                     seen.add(g_clean)
-
-                    print(f"   ✅ Added Gemini: {g_clean}")
-
-                if len(primary_results) >= size:
-                    print("⚡ Reached size limit (Gemini)")
+                if len(final_results) >= size:
                     break
-
+            fallback_type = "did_you_mean"
         except Exception as e:
-            print("❌ Gemini Failed:", str(e))
+            print(f"❌ Gemini Failed: {e}")
     else:
-        print("✅ Enough results from ES, skipping Gemini")
-
-    # ---------------------------------------------------------
-    # 🔹 FINAL RESPONSE
-    # ---------------------------------------------------------
-    print("\n📦 FINAL RESULTS:")
-    print(primary_results[:size])
-    print("=" * 60 + "\n")
+        print("✅ Found enough results in ES. Skipping Gemini to save credits.")
 
     return {
         "success": True,
         "query": q,
-        "primary_results": primary_results[:size],
+        "primary_results": final_results[:size],
         "fallback_results": [],
-        "fallback_type": None if primary_results else "gemini_only",
+        "fallback_type": fallback_type,
     }
