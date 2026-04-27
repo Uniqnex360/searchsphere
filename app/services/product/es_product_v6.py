@@ -147,6 +147,7 @@ async def get_product_list_v6(
     page: int = 1,
     size: int = 50,
     index: str = "product_v7",
+    end_date: datetime = None,
 ) -> Dict[str, Any]:
 
     start_total = time.perf_counter()
@@ -200,6 +201,9 @@ async def get_product_list_v6(
     # 1. Build Filters & Query
     start_build = time.perf_counter()
     filters = []
+
+    if end_date:
+        filters.append({"range": {"created_at": {"lte": end_date.isoformat()}}})
     if brand:
         filters.append({"terms": {"brand.keyword": brand}})
     if product_type:
@@ -226,12 +230,14 @@ async def get_product_list_v6(
 
         ignore_list = ["3m"]
 
+        # Pre-processing: q_clean for exact matches, q_expanded for broad/OR matches
+        q_clean = q.strip()
         if q.lower() not in ignore_list:
-            q_clean = q.strip()
             q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
         else:
-            q_clean = q.strip()
             q_expanded = q
+
+        print("query", q, "| expanded:", q_expanded, "| clean:", q_clean)
 
         return {
             "function_score": {
@@ -253,6 +259,35 @@ async def get_product_list_v6(
                             }
                         ],
                         "should": [
+                            # --- 1. PRIORITY EXACT MATCHES (Using q_clean) ---
+                            {
+                                "term": {
+                                    "sku.keyword": {
+                                        "value": q_clean,
+                                        "boost": 200000,
+                                        "case_insensitive": True,
+                                    }
+                                }
+                            },
+                            {
+                                "term": {
+                                    "mpn.keyword": {
+                                        "value": q_clean,
+                                        "boost": 180000,
+                                        "case_insensitive": True,
+                                    }
+                                }
+                            },
+                            {
+                                "term": {
+                                    "product_name.keyword": {
+                                        "value": q_clean,
+                                        "boost": 150000,
+                                        "case_insensitive": True,
+                                    }
+                                }
+                            },
+                            # --- 2. EXISTING LOGIC (Analyzed matches) ---
                             {
                                 "term": {
                                     "brand": {
@@ -271,18 +306,8 @@ async def get_product_list_v6(
                                     }
                                 }
                             },
-                            {
-                                "term": {
-                                    "sku.keyword": {"value": q_clean, "boost": 20000}
-                                }
-                            },
-                            {
-                                "term": {
-                                    "mpn.keyword": {"value": q_clean, "boost": 18000}
-                                }
-                            },
-                            {"match": {"sku": {"query": q_expanded, "boost": 5000}}},
-                            {"match": {"mpn": {"query": q_expanded, "boost": 4000}}},
+                            {"match": {"sku": {"query": q_clean, "boost": 5000}}},
+                            {"match": {"mpn": {"query": q_clean, "boost": 4000}}},
                             {
                                 "term": {
                                     "brand.keyword": {
@@ -355,7 +380,7 @@ async def get_product_list_v6(
                         "minimum_should_match": 1,
                     }
                 },
-                "boost_mode": "multiply",
+                "boost_mode": "sum",
                 "field_value_factor": {
                     "field": "search_popularity",
                     "modifier": "log1p",

@@ -659,8 +659,9 @@ async def product_list_v6(
     sort_by: str | None = None,
     sort_order: str = "desc",
     page: int = 1,
+    end_date: Optional[datetime] = Query(None)
 ):
-    print("category", category_)
+
     start_total = time.perf_counter()
 
     # 1. Extract Dynamic Attribute Filters
@@ -687,6 +688,7 @@ async def product_list_v6(
         "price_min": price_min,
         "price_max": price_max,
         "attr_filters": attr_filters,  # Added to the payload for logging
+        "end_date": end_date,
     }
 
     # 3. Call your ES logic
@@ -697,12 +699,13 @@ async def product_list_v6(
         brand=brand_,
         product_type=product_type_,
         category=category_,
-        attr_filters=attr_filters,  # <--- PASSING THE DYNAMIC DICT HERE
+        attr_filters=attr_filters,
         min_price=price_min,
         max_price=price_max,
         sort_by=sort_by,
         sort_order=sort_order,
         page=page,
+        end_date=end_date,
     )
     es_duration = time.perf_counter() - start_es
     print(f"Timing - Elasticsearch Query: {es_duration:.4f}s")
