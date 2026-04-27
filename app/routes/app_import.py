@@ -1,7 +1,7 @@
 import tempfile
 import csv
 import os
-from datetime import date
+from datetime import date, datetime
 from io import StringIO
 from typing import Optional
 from openpyxl import load_workbook
@@ -220,10 +220,10 @@ async def get_import_list(
     module_type: Optional[ImportType] = Query(
         None, description="Filter by module type"
     ),
-    start_date: Optional[date] = Query(
+    start_date: Optional[datetime] = Query(
         None, description="Filter from this date (YYYY-MM-DD)"
     ),
-    end_date: Optional[date] = Query(
+    end_date: Optional[datetime] = Query(
         None, description="Filter to this date (YYYY-MM-DD)"
     ),
     limit: int = Query(20, ge=1, le=100),
