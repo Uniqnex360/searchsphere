@@ -203,7 +203,17 @@ async def get_product_list_v6(
     filters = []
 
     if end_date:
-        filters.append({"range": {"created_at": {"lte": end_date.isoformat()}}})
+        filters.append(
+            {
+                "bool": {
+                    "should": [
+                        {"range": {"created_at": {"lte": end_date.isoformat()}}},
+                        {"bool": {"must_not": {"exists": {"field": "created_at"}}}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        )
     if brand:
         filters.append({"terms": {"brand.keyword": brand}})
     if product_type:
@@ -236,8 +246,6 @@ async def get_product_list_v6(
             q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
         else:
             q_expanded = q
-
-        print("query", q, "| expanded:", q_expanded, "| clean:", q_clean)
 
         return {
             "function_score": {
@@ -519,36 +527,9 @@ async def get_product_list_v6(
         },
     }
 
-    start_network = time.perf_counter()
     resp = es.search(index=index, body=body)
 
-    # FULL IDS (safe)
-    # all_ids = [hit["_id"] for hit in resp["hits"]["hits"]]
-
-    # search_after = None
-    # if resp["hits"]["hits"] and "sort" in resp["hits"]["hits"][-1]:
-    #     search_after = resp["hits"]["hits"][-1]["sort"]
-
-    # body.pop("from", None)
-
     first_resp = resp  # IMPORTANT FIX
-
-    # while search_after:
-    #     body["search_after"] = search_after
-    #     body["size"] = 5000
-
-    #     resp = es.search(index=index, body=body)
-    #     hits = resp["hits"]["hits"]
-
-    #     if not hits:
-    #         break
-
-    #     all_ids.extend([hit["_id"] for hit in hits])
-
-    #     if "sort" in hits[-1]:
-    #         search_after = hits[-1]["sort"]
-    #     else:
-    #         break
 
     total_hits = first_resp.get("hits", {}).get("total", {}).get("value", 0)
     total_docs = (
