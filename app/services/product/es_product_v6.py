@@ -467,6 +467,7 @@ async def get_product_list_v6(
         "query": query_body,
         "post_filter": {"bool": {"must": filters}},
         "track_total_hits": True,
+        "track_scores": True, 
         "sort": es_sort,
         "_source": [
             "product_name",
@@ -548,8 +549,9 @@ async def get_product_list_v6(
     total_docs = (
         first_resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
     )
-
+    print("first response", first_resp)
     hits = first_resp.get("hits", {}).get("hits", [])
+
     max_score = first_resp.get("hits", {}).get("max_score", 0)
     results = []
     for hit in hits:
