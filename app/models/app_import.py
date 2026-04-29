@@ -12,6 +12,7 @@ class APPImport(BaseModel, table=True):
 
     task_id: Optional[str] = Field(default=None, index=True)
     module_type: ImportType = Field(default=ImportType.PRODUCT)
+    file_name: Optional[str] = Field(default=None)
     status: CeleryTaskStatus = Field(default=CeleryTaskStatus.PENDING)
 
     rows: Optional[int] = Field(default=None)
