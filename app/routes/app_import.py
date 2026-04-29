@@ -193,7 +193,7 @@ async def upload_products_file(
     # =====================================================
     # ✅ COMMON FLOW (UNCHANGED)
     # =====================================================
-    obj = APPImport(module_type=ImportType.PRODUCT)
+    obj = APPImport(module_type=ImportType.PRODUCT, file_name=filename)
 
     session.add(obj)
     await session.commit()
@@ -266,6 +266,7 @@ async def get_import_list(
         {
             "task_id": imp.task_id,
             "module_type": imp.module_type,
+            "file_name": imp.file_name,
             "status": imp.status,
             "rows": imp.rows,
             "meta_data": imp.meta_data,
