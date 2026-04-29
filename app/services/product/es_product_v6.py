@@ -253,8 +253,10 @@ async def get_product_list_v6(
         q_expanded = q_expanded.replace("3 m", "3m")
 
         from app.helpers import get_gemini_synonyms
-
+        print("started")
+        start_time = time.time()
         q_expanded = get_gemini_synonyms(q_expanded)
+        print("gemini time", time.time() - start_time())
 
         print("gemini synonyms", q_expanded)
         # q_expanded = re.sub(r"\bpaint\b", "paint paints", q_expanded)
@@ -549,7 +551,6 @@ async def get_product_list_v6(
     total_docs = (
         first_resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
     )
-    print("first response", first_resp)
     hits = first_resp.get("hits", {}).get("hits", [])
 
     max_score = first_resp.get("hits", {}).get("max_score", 0)
