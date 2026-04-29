@@ -251,9 +251,14 @@ async def get_product_list_v6(
         q_clean = q.strip()
         q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
         q_expanded = q_expanded.replace("3 m", "3m")
-        q_expanded = re.sub(r"\bpaint\b", "paint paints", q_expanded)
-        q_expanded = re.sub(r"\bpaints\b", "paint paints", q_expanded)
 
+        from app.helpers import get_gemini_synonyms
+
+        q_expanded = get_gemini_synonyms(q_expanded)
+
+        print("gemini synonyms", q_expanded)
+        # q_expanded = re.sub(r"\bpaint\b", "paint paints", q_expanded)
+        # q_expanded = re.sub(r"\bpaints\b", "paint paints", q_expanded)
 
         return {
             "function_score": {
@@ -545,6 +550,7 @@ async def get_product_list_v6(
     )
 
     hits = first_resp.get("hits", {}).get("hits", [])
+    max_score = first_resp.get("hits", {}).get("max_score", 0)
     results = []
     for hit in hits:
         source = hit["_source"]
@@ -597,6 +603,7 @@ async def get_product_list_v6(
     total_fn_duration = time.perf_counter() - start_total
 
     return {
+        "max_score": max_score,
         "total_docs_after_filter": total_hits,
         "total_docs": total_docs,
         "page": page,
