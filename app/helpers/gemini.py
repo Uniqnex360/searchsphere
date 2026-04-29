@@ -1,4 +1,3 @@
-import os
 import json
 from functools import lru_cache
 
@@ -67,61 +66,41 @@ def get_gemini_autocompletion(keyword: str):
         return []
 
 
-from functools import lru_cache
-
-
 @lru_cache(maxsize=500)
 def get_gemini_synonyms(keyword: str) -> str:
-    """
-    Returns ONLY:
-    - original keyword
-    - singular form
-    - plural form
-    No synonyms, no extra words.
-    """
+    keyword = keyword.strip().lower()
 
     system_instruction = (
-        "You are a strict linguistic processor.\n"
-        "Return ONLY the singular and plural forms of the given word.\n"
-        "Rules:\n"
-        "1. Output ONLY space-separated words.\n"
-        "2. Do NOT include synonyms.\n"
-        "3. Do NOT include explanations.\n"
-        "4. Maximum 2 words.\n"
-        "5. If input is already singular/plural, include both forms.\n"
-        "6. If no plural exists, return the word once."
+        "Be extremely fast and minimal.\n"
+        "Return ONLY singular and plural forms of the word.\n"
+        "Output only space-separated words.\n"
+        "Max 2 words.\n"
+        "IMPORTANT FAST RULE:\n"
+        "- If you are not 100% confident about singular or plural form,\n"
+        "  immediately return ONLY the original word.\n"
+        "- Do NOT try to guess or reason deeply.\n"
+        "- Prefer speed over completeness.\n"
     )
-
-    prompt = f"Word: {keyword}"
 
     try:
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             config={
                 "system_instruction": system_instruction,
-                "temperature": 0.0,  # make it strict/deterministic
+                "temperature": 0.0,
             },
-            contents=prompt,
+            contents=f"Word: {keyword}",
         )
 
-        result_text = response.text.strip().lower()
-        result_text = result_text.replace('"', "").replace("'", "")
+        words = response.text.strip().lower().split()[:2]
 
-        words = result_text.split()
+        if not words:
+            return keyword
 
-        # HARD GUARD: keep only 2 words max
-        words = words[:2]
+        if keyword not in words:
+            words.insert(0, keyword)
 
-        # Ensure original keyword is included
-        if keyword.lower() not in words:
-            words.insert(0, keyword.lower())
+        return " ".join(dict.fromkeys(words))
 
-        # Deduplicate
-        final_string = " ".join(dict.fromkeys(words))
-
-        print(f"✅ Processed '{keyword}': {final_string}")
-        return final_string
-
-    except Exception as e:
-        print(f"❌ Gemini error: {e}")
+    except Exception:
         return keyword
