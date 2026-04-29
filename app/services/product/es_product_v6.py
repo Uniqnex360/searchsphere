@@ -251,6 +251,7 @@ async def get_product_list_v6(
         q_clean = q.strip()
         q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
         q_expanded = q_expanded.replace("3 m", "3m")
+        q_expanded = q_expanded.replace("paint", "paints")
 
         return {
             "function_score": {
