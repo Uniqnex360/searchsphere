@@ -238,14 +238,19 @@ async def get_product_list_v6(
         if not q:
             return {"match_all": {}}
 
-        ignore_list = ["3m"]
+        # ignore_list = ["3m"]
 
-        # Pre-processing: q_clean for exact matches, q_expanded for broad/OR matches
+        # # Pre-processing: q_clean for exact matches, q_expanded for broad/OR matches
+        # q_clean = q.strip()
+        # if q.lower() not in ignore_list:
+        #     q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
+
+        # else:
+        #     q_expanded = q
+
         q_clean = q.strip()
-        if q.lower() not in ignore_list:
-            q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
-        else:
-            q_expanded = q
+        q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
+        q_expanded = q_expanded.replace("3 m", "3m")
 
         return {
             "function_score": {
