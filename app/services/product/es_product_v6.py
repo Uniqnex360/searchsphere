@@ -274,11 +274,11 @@ async def get_product_list_v6(
             q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
             q_expanded = q_expanded.replace("3 m", "3m")
 
-            print("started")
-            start_time = time.time()
-            q_expanded = get_gemini_synonyms(q_expanded)
-            print("gemini time", time.time() - start_time)
-            print("gemini synonyms", q_expanded)
+            # print("started")
+            # start_time = time.time()
+            # # q_expanded = get_gemini_synonyms(q_expanded)
+            # print("gemini time", time.time() - start_time)
+            # print("gemini synonyms", q_expanded)
 
         # -------------------------------
         # ✅ Resolve filter values
@@ -317,6 +317,7 @@ async def get_product_list_v6(
                                         "category^20",
                                         "suggest^20",
                                     ],
+                                    "analyzer": "english",
                                     "operator": "or",
                                     "minimum_should_match": 1,
                                 }
@@ -409,6 +410,7 @@ async def get_product_list_v6(
                                         "product_name^50",
                                         "features.value^20",
                                     ],
+                                    "analyzer": "english",
                                     "operator": "and",
                                     "boost": 200,
                                 }
@@ -418,6 +420,7 @@ async def get_product_list_v6(
                                 "multi_match": {
                                     "query": q_expanded,
                                     "fields": ["attributes.value^80"],
+                                    "analyzer": "english",
                                     "fuzziness": "AUTO",
                                     "operator": "and",
                                     "boost": 80,
@@ -433,6 +436,7 @@ async def get_product_list_v6(
                                         "product_type^60",
                                         "category^40",
                                     ],
+                                    "analyzer": "english",
                                     "fuzziness": "AUTO:4,6",
                                     "prefix_length": 1,
                                     "operator": "and",
