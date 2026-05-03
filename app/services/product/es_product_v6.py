@@ -276,7 +276,7 @@ async def get_product_list_v6(
 
             print("started")
             start_time = time.time()
-            # q_expanded = get_gemini_synonyms(q_expanded)
+            q_expanded = get_gemini_synonyms(q_expanded)
             print("gemini time", time.time() - start_time)
             print("gemini synonyms", q_expanded)
 
