@@ -274,11 +274,11 @@ async def get_product_list_v6(
             q_expanded = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", q_clean.lower())
             q_expanded = q_expanded.replace("3 m", "3m")
 
-            # print("started")
-            # start_time = time.time()
-            # # q_expanded = get_gemini_synonyms(q_expanded)
-            # print("gemini time", time.time() - start_time)
-            # print("gemini synonyms", q_expanded)
+            print("started")
+            start_time = time.time()
+            # q_expanded = get_gemini_synonyms(q_expanded)
+            print("gemini time", time.time() - start_time)
+            print("gemini synonyms", q_expanded)
 
         # -------------------------------
         # ✅ Resolve filter values
