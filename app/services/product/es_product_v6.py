@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from app.models import Product
+from app.helpers import get_gemini_synonyms
 from app.services import ESCollection, ElasticsearchIndexManager
 
 
@@ -222,6 +223,9 @@ async def get_product_list_v6(
 
     from app.helpers import parse_query
 
+    query = get_gemini_synonyms(query)
+
+
     parsed_filters: dict = await parse_query(query, es)
     print("paresd filters", parsed_filters)
 
@@ -274,7 +278,7 @@ async def get_product_list_v6(
 
     def build_query(q, filters: dict = None):
 
-        from app.helpers import get_gemini_synonyms
+
 
         if not q:
             q_clean = ""
@@ -288,6 +292,7 @@ async def get_product_list_v6(
             start_time = time.time()
             print("before gemini", q_expanded)
             q_expanded = get_gemini_synonyms(q_expanded)
+            print("q expanded", type(q_expanded))
             print("gemini time", time.time() - start_time)
             print("gemini synonyms", q_expanded)
 
