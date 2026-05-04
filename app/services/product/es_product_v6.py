@@ -133,6 +133,13 @@ def add_sort(es_sort, field, sort_order):
     )
 
 
+def clean_empty(values):
+    if not values:
+        return None
+    cleaned = [v for v in values if v not in ("", None)]
+    return cleaned or None
+
+
 async def get_product_list_v6(
     es: Elasticsearch,
     query: str = None,
@@ -225,7 +232,6 @@ async def get_product_list_v6(
     #     "product_type": [],
     # }
 
-
     if parsed_filters.get("brand", []):
         if brand is None:
             brand = []
@@ -240,6 +246,10 @@ async def get_product_list_v6(
         if product_type is None:
             product_type = []
         product_type.extend(parsed_filters.get("product_type", []))
+
+    brand = clean_empty(brand)
+    category = clean_empty(category)
+    product_type = clean_empty(product_type)
 
     if brand:
         filters.append({"terms": {"brand.keyword": brand}})
@@ -528,6 +538,7 @@ async def get_product_list_v6(
         "size": size,
         "query": query_body,
         "post_filter": {"bool": {"must": filters}},
+        # "query": {"bool": {"must": query_body, "filter": filters}},
         "track_total_hits": True,
         "track_scores": True,
         "sort": es_sort,
