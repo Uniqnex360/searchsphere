@@ -4,7 +4,6 @@ from functools import lru_cache
 from google import genai
 from app.settings import settings
 
-
 # ---------------------------------------------------------
 # 🔹 Gemini Client
 # ---------------------------------------------------------
