@@ -223,9 +223,6 @@ async def get_product_list_v6(
 
     from app.helpers import parse_query
 
-    query = get_gemini_synonyms(query)
-
-
     parsed_filters: dict = await parse_query(query, es)
     print("paresd filters", parsed_filters)
 
