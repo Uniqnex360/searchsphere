@@ -223,7 +223,8 @@ async def get_product_list_v6(
 
     from app.helpers import parse_query
 
-    parsed_filters: dict = await parse_query(query, es)
+    # parsed_filters: dict = await parse_query(query, es)
+    parsed_filters = {}
     print("paresd filters", parsed_filters)
 
     # ex: output structure
