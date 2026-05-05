@@ -1,13 +1,14 @@
 import json
 import redis
+import re
 from elasticsearch import Elasticsearch
 from typing import Dict, List, Any
 
 REDIS_KEY = "product:taxonomy:cache"
 
 redis_client = redis.Redis(
-    host="redis", 
-    # host="localhost",
+    host="redis",
+    #host="localhost",
     port=6379,
     decode_responses=True,
 )
@@ -67,16 +68,27 @@ def get_taxonomy() -> Dict[str, List[str]]:
 
 
 # -----------------------------
-# 4. MATCH QUERY AGAINST TAXONOMY
+# 4. MATCH QUERY AGAINST TAXONOMY (FIXED)
 # -----------------------------
+def _normalize(text: str) -> str:
+    return re.sub(r"[^a-z0-9\s]", " ", text.lower())
+
+
+def _is_whole_match(term: str, query: str) -> bool:
+    pattern = r"\b" + re.escape(term.lower()) + r"\b"
+    return re.search(pattern, query.lower()) is not None
+
+
 def match_query(query: str, taxonomy: Dict[str, List[str]]) -> Dict[str, Any]:
     q = query.lower()
 
-    matched_brands = [b for b in taxonomy["brands"] if b.lower() in q]
+    matched_brands = [b for b in taxonomy["brands"] if _is_whole_match(b, q)]
 
-    matched_categories = [c for c in taxonomy["categories"] if c.lower() in q]
+    matched_categories = [c for c in taxonomy["categories"] if _is_whole_match(c, q)]
 
-    matched_product_types = [p for p in taxonomy["product_types"] if p.lower() in q]
+    matched_product_types = [
+        p for p in taxonomy["product_types"] if _is_whole_match(p, q)
+    ]
 
     return {
         "brand": matched_brands,
