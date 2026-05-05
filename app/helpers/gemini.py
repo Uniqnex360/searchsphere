@@ -65,21 +65,68 @@ def get_gemini_autocompletion(keyword: str):
         return []
 
 
-@lru_cache(maxsize=500)
-def get_gemini_synonyms(keyword: str) -> str:
-    keyword = keyword.strip().lower()
+# @lru_cache(maxsize=500)
+# def get_gemini_synonyms(keyword: str) -> str:
+#     keyword = keyword.strip().lower()
 
-    system_instruction = (
-        "Be extremely fast and minimal.\n"
-        "Return ONLY singular and plural forms of the word.\n"
-        "Output only space-separated words.\n"
-        "Max 2 words.\n"
-        "IMPORTANT FAST RULE:\n"
-        "- If you are not 100% confident about singular or plural form,\n"
-        "  immediately return ONLY the original word.\n"
-        "- Do NOT try to guess or reason deeply.\n"
-        "- Prefer speed over completeness.\n"
-    )
+#     system_instruction = (
+#         "Be extremely fast and minimal.\n"
+#         "Return ONLY singular and plural forms of the word.\n"
+#         "Output only space-separated words.\n"
+#         "Max 2 words.\n"
+#         "IMPORTANT FAST RULE:\n"
+#         "- If you are not 100% confident about singular or plural form,\n"
+#         "  immediately return ONLY the original word.\n"
+#         "- Do NOT try to guess or reason deeply.\n"
+#         "- Prefer speed over completeness.\n"
+#     )
+
+#     try:
+#         response = client.models.generate_content(
+#             model="gemini-3-flash-preview",
+#             config={
+#                 "system_instruction": system_instruction,
+#                 "temperature": 0.0,
+#             },
+#             contents=f"Word: {keyword}",
+#         )
+
+#         words = response.text.strip().lower().split()[:2]
+
+#         if not words:
+#             return keyword
+
+#         if keyword not in words:
+#             words.insert(0, keyword)
+
+#         return " ".join(dict.fromkeys(words))
+
+#     except Exception:
+#         return keyword
+
+
+@lru_cache(maxsize=500)
+def get_gemini_synonyms(query: str) -> str:
+    query = (query or "").strip().lower()
+
+    if not query:
+        return ""
+
+    system_instruction = """
+You are a FAST ecommerce synonym engine.
+
+TASK:
+Return the input query plus relevant ecommerce synonyms.
+
+RULES:
+- Output ONLY space-separated tokens.
+- No punctuation, no explanation.
+- Minimum 3 and maximum 6 tokens total.
+- ALWAYS include the original query as the first token.
+- Include only close synonyms or alternate product names.
+- Avoid unrelated or broad terms.
+- Do NOT repeat words.
+"""
 
     try:
         response = client.models.generate_content(
@@ -88,18 +135,25 @@ def get_gemini_synonyms(keyword: str) -> str:
                 "system_instruction": system_instruction,
                 "temperature": 0.0,
             },
-            contents=f"Word: {keyword}",
+            contents=f"Input: {query}",
         )
 
-        words = response.text.strip().lower().split()[:2]
+        if not response or not response.text:
+            return query
 
-        if not words:
-            return keyword
+        words = response.text.strip().lower().split()
 
-        if keyword not in words:
-            words.insert(0, keyword)
+        # ensure original is first
+        if query not in words:
+            words.insert(0, query)
+        else:
+            words.remove(query)
+            words.insert(0, query)
 
-        return " ".join(dict.fromkeys(words))
+        # dedupe + strict cap
+        words = list(dict.fromkeys(words))[:6]
+
+        return " ".join(words)
 
     except Exception:
-        return keyword
+        return query
