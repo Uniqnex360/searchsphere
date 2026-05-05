@@ -9,6 +9,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from app.models import Product
 from app.helpers import get_gemini_synonyms
+from app.helpers import get_embedding
 from app.services import ESCollection, ElasticsearchIndexManager
 
 
@@ -139,6 +140,27 @@ def clean_empty(values):
         return None
     cleaned = [v for v in values if v not in ("", None)]
     return cleaned or None
+
+
+def semantic_fallback_search(es, index, query_vector, size):
+    return es.search(
+        index=index,
+        knn={
+            "field": "word_embedding",
+            "query_vector": query_vector,
+            "k": size,
+            "num_candidates": size * 2,
+        },
+        size=size,
+        _source=[
+            "product_name",
+            "brand",
+            "category",
+            "product_type",
+            "base_price",
+            "images.url",
+        ],
+    )
 
 
 async def get_product_list_v6(
@@ -331,7 +353,7 @@ async def get_product_list_v6(
                                     ],
                                     # "analyzer": "english",
                                     "operator": "or",
-                                     "minimum_should_match": "1",
+                                    "minimum_should_match": "1",
                                 }
                             }
                         ],
@@ -484,7 +506,6 @@ async def get_product_list_v6(
                                 }
                             },
                         ],
-                       
                     }
                 },
                 "functions": [
@@ -514,7 +535,6 @@ async def get_product_list_v6(
         main_query = build_query(
             query,
         )
-        print(main_query)
         synonym_terms = get_synonyms(query)
         synonym_queries = [build_query(s) for s in synonym_terms]
         query_body = {
@@ -650,6 +670,62 @@ async def get_product_list_v6(
     first_resp = resp  # IMPORTANT FIX
 
     total_hits = first_resp.get("hits", {}).get("total", {}).get("value", 0)
+    if total_hits == 0 and query:
+        print("⚡ fallback → semantic search")
+
+        query_vector = get_embedding(query)
+
+        fallback_resp = semantic_fallback_search(
+            es=es,
+            index=index,
+            query_vector=query_vector,
+            size=size,
+        )
+
+        hits = fallback_resp.get("hits", {}).get("hits", [])
+
+        results = []
+        for hit in hits:
+            source = hit["_source"]
+
+            results.append(
+                {
+                    "id": hit["_id"],
+                    "score": hit.get("_score", 0),
+                    "name": source.get("product_name"),
+                    "brand": source.get("brand"),
+                    "product_type": source.get("product_type"),
+                    "category": source.get("category"),
+                    "base_price": source.get("base_price"),
+                    "images": [
+                        i.get("url")
+                        for i in source.get("images", [])
+                        if isinstance(i, dict)
+                    ],
+                }
+            )
+
+        total = (
+            fallback_resp.get("hits", {}).get("total", {}).get("value", len(results))
+        )
+
+        return {
+            "max_score": fallback_resp.get("hits", {}).get("max_score"),
+            "total_docs_after_filter": total,
+            "total_docs": total,
+            "page": 1,
+            "size": size,
+            "total_pages": 1,
+            "results": results,
+            "facets": {
+                "brands": [],
+                "categories": [],
+                "product_type": [],
+                "dynamic_attributes": {},
+            },
+            "fallback": True,
+        }
+
     total_docs = (
         first_resp.get("aggregations", {}).get("all_docs_count", {}).get("doc_count", 0)
     )

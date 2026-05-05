@@ -10,7 +10,7 @@ router = APIRouter()
 
 @router.post("/update-embedding/")
 async def update_product_mapping(es: Elasticsearch = Depends(get_es)):
-    index = ESCollection.PRODUCT_V6.value
+    index = ESCollection.PRODUCT_V7.value
 
     if not es.indices.exists(index=index):
         raise HTTPException(status_code=404, detail="Index not found")
@@ -41,44 +41,75 @@ async def update_product_mapping(es: Elasticsearch = Depends(get_es)):
 
 
 # -----------------------------
-# helper to build text
+# FIXED helper to build text
 # -----------------------------
 def build_text(doc: dict) -> str:
-    return " ".join(
-        filter(
-            None,
-            [
-                doc.get("name", ""),
-                doc.get("brand", ""),
-                doc.get("category", ""),
-                doc.get("product_type", ""),
-                " ".join(
-                    doc.get("attributes", [])
-                    if isinstance(doc.get("attributes"), list)
-                    else []
-                ),
-            ],
-        )
-    ).strip()
+    # Use product_name as per your mapping, fallback to name
+    name = doc.get("product_name") or doc.get("name") or ""
+    brand = doc.get("brand") or ""
+    category = doc.get("category") or ""
+    p_type = doc.get("product_type") or ""
+
+    parts = [str(name), str(brand), str(category), str(p_type)]
+
+    # Handle attributes list of dicts
+    attrs = doc.get("attributes", [])
+    if isinstance(attrs, list):
+        for a in attrs:
+            if isinstance(a, dict):
+                v = a.get("value")
+                if v:
+                    parts.append(str(v))
+            elif isinstance(a, str):
+                parts.append(a)
+
+    return " ".join(filter(None, parts)).strip()
 
 
 @router.post("/update-word-embeddings/")
 async def update_word_embeddings(
     es: Elasticsearch = Depends(get_es),
-    batch_size: int = 100,  # 👈 configurable batch size
+    batch_size: int = 100,
 ):
-    index = ESCollection.PRODUCT_V6.value
+    index = ESCollection.PRODUCT_V7.value  # Ensure this is the correct index name
 
     if not es.indices.exists(index=index):
         raise HTTPException(status_code=404, detail="Index not found")
 
+    def document_generator(hits):
+        for doc in hits:
+            try:
+                source = doc.get("_source", {})
+                text = build_text(source)
+
+                if not text:
+                    continue
+
+                embedding = get_embedding(text)
+
+                if embedding:
+                    yield {
+                        "_op_type": "update",
+                        "_index": index,
+                        "_id": doc["_id"],
+                        "doc": {
+                            "word_embedding": embedding,
+                        },
+                    }
+            except Exception as e:
+                print(f"Error processing doc {doc.get('_id')}: {e}")
+                continue
+
     try:
-        scroll = es.search(
+        scroll_timeout = "5m"
+        # Adjusted _source to match your actual mapping field names
+        page = es.search(
             index=index,
-            scroll="2m",
+            scroll=scroll_timeout,
             size=batch_size,
             body={
                 "_source": [
+                    "product_name",
                     "name",
                     "brand",
                     "category",
@@ -89,58 +120,24 @@ async def update_word_embeddings(
             },
         )
 
-        scroll_id = scroll["_scroll_id"]
-        hits = scroll["hits"]["hits"]
-
+        scroll_id = page["_scroll_id"]
+        hits = page["hits"]["hits"]
         total_updated = 0
-        batch_count = 0
 
         while hits:
-            actions = []
-
-            for doc in hits:
-                doc_id = doc["_id"]
-                source = doc["_source"]
-
-                text = build_text(source)
-                embedding = get_embedding(text)
-
-                if not embedding:
-                    continue
-
-                actions.append(
-                    {
-                        "_op_type": "update",
-                        "_index": index,
-                        "_id": doc_id,
-                        "doc": {
-                            "word_embedding": embedding,  # 👈 only new field
-                        },
-                    }
-                )
-
+            actions = list(document_generator(hits))
             if actions:
-                helpers.bulk(es, actions)
-                total_updated += len(actions)
-                batch_count += 1
+                success, _ = helpers.bulk(es, actions, stats_only=True)
+                total_updated += success
+                print(f"Updated: {success} | Total: {total_updated}")
 
-                print(
-                    f"Batch {batch_count} done | "
-                    f"Updated: {len(actions)} docs | "
-                    f"Total: {total_updated}"
-                )
+            page = es.scroll(scroll_id=scroll_id, scroll=scroll_timeout)
+            scroll_id = page["_scroll_id"]
+            hits = page["hits"]["hits"]
 
-            # next batch
-            scroll = es.scroll(scroll_id=scroll_id, scroll="2m")
-            scroll_id = scroll["_scroll_id"]
-            hits = scroll["hits"]["hits"]
-
-        print(f"✅ Completed | Total updated docs: {total_updated}")
-
-        return {
-            "message": "embedding backfill completed",
-            "total_updated": total_updated,
-        }
+        es.clear_scroll(scroll_id=scroll_id)
+        return {"status": "success", "total_updated": total_updated}
 
     except Exception as e:
+        print(f"Backfill failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
