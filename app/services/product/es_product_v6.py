@@ -389,7 +389,7 @@ async def get_product_list_v6(
                             },
                             # --- PRODUCT TYPE ---
                             {
-                                "match_phrase": {
+                                "match": {
                                     "product_type": {
                                         "query": product_type_query,
                                         "boost": 80,
