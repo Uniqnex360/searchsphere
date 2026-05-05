@@ -216,7 +216,6 @@ async def get_product_list_v6(
                         {"range": {"created_at": {"lte": end_date.isoformat()}}},
                         {"bool": {"must_not": {"exists": {"field": "created_at"}}}},
                     ],
-                    "minimum_should_match": 1,
                 }
             }
         )
@@ -276,8 +275,6 @@ async def get_product_list_v6(
 
     def build_query(q, filters: dict = None):
 
-
-
         if not q:
             q_clean = ""
             q_expanded = ""
@@ -332,14 +329,31 @@ async def get_product_list_v6(
                                         "category^20",
                                         "suggest^20",
                                     ],
-                                    "analyzer": "english",
+                                    # "analyzer": "english",
                                     "operator": "or",
-                                    "minimum_should_match": 1,
+                                     "minimum_should_match": "1",
                                 }
                             }
                         ],
                         "should": [
                             # --- EXACT MATCHES ---
+                            {
+                                "match": {
+                                    "product_type": {
+                                        "query": q_expanded,
+                                        "operator": "and",
+                                        "boost": 200,
+                                    }
+                                }
+                            },
+                            {
+                                "match_phrase": {
+                                    "product_type": {
+                                        "query": q_expanded,
+                                        "boost": 2000,  # Perfect phrase boost
+                                    }
+                                }
+                            },
                             {
                                 "term": {
                                     "sku.keyword": {
@@ -388,11 +402,22 @@ async def get_product_list_v6(
                                 }
                             },
                             # --- PRODUCT TYPE ---
+                            # {
+                            #     "match": {
+                            #         "product_type": {
+                            #             "query": product_type_query,
+                            #             "boost": 80,
+                            #         }
+                            #     }
+                            # },
                             {
                                 "match": {
                                     "product_type": {
-                                        "query": product_type_query,
-                                        "boost": 80,
+                                        "query": q_expanded,
+                                        "fuzziness": "AUTO",
+                                        "prefix_length": 1,
+                                        "operator": "and",
+                                        "boost": 200,
                                     }
                                 }
                             },
@@ -459,7 +484,7 @@ async def get_product_list_v6(
                                 }
                             },
                         ],
-                        "minimum_should_match": 1,
+                       
                     }
                 },
                 "functions": [
@@ -489,12 +514,13 @@ async def get_product_list_v6(
         main_query = build_query(
             query,
         )
+        print(main_query)
         synonym_terms = get_synonyms(query)
         synonym_queries = [build_query(s) for s in synonym_terms]
         query_body = {
             "bool": {
+                # "should": [main_query, *synonym_queries],
                 "should": [main_query, *synonym_queries],
-                "minimum_should_match": 1,
             }
         }
     else:
