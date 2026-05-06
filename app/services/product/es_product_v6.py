@@ -583,8 +583,22 @@ async def get_product_list_v6(
 
     es_sort.append({"search_popularity": {"order": "desc", "missing": "_last"}})
 
+    print(brand, category, product_type, "filters")
+
+    is_any_filter_used = any(
+        [
+            bool(brand),
+            bool(category),
+            bool(product_type),
+        ]
+    )
+
+    has_query = bool(query and query.strip())
+
     body = {
-        "runtime_mappings": runtime_mappings,
+        "runtime_mappings": (
+            runtime_mappings if (has_query or is_any_filter_used) else {}
+        ),
         "from": current_from,
         "size": size,
         "query": query_body,
@@ -600,7 +614,6 @@ async def get_product_list_v6(
             "base_price",
             "images.url",
             "product_type",
-            "suggest",
             "view_count",
             "search_popularity",
             "review",
@@ -618,7 +631,7 @@ async def get_product_list_v6(
                     "values": {
                         "terms": {
                             "field": "brand.keyword",
-                            "size": 1000,
+                            "size": 150,
                             "order": {"_key": "asc"},
                         }
                     }
@@ -636,7 +649,7 @@ async def get_product_list_v6(
                     "values": {
                         "terms": {
                             "field": "product_type.keyword",
-                            "size": 1000,
+                            "size": 150,
                             "order": {"_key": "asc"},
                         }
                     }
@@ -652,7 +665,7 @@ async def get_product_list_v6(
                     "values": {
                         "terms": {
                             "field": "category.keyword",
-                            "size": 1000,
+                            "size": 150,
                             "order": {"_key": "asc"},
                         }
                     }
@@ -660,7 +673,7 @@ async def get_product_list_v6(
             },
             "dynamic_attributes_filtered": {
                 "filter": {"bool": {"must": filters}},
-                "aggs": {"values": {"terms": {"field": "attr_pairs", "size": 2000}}},
+                "aggs": {"values": {"terms": {"field": "attr_pairs", "size": 150}}},
             },
         },
     }
