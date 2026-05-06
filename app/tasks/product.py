@@ -11,6 +11,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import streaming_bulk
 
 from app.es_client import get_es
+from app.helpers import get_embedding
 from app.services import ESCollection
 from app.database import get_sync_session
 from app.models import (
@@ -206,6 +207,46 @@ from elasticsearch.helpers import streaming_bulk
 from elasticsearch import Elasticsearch
 
 
+def get_word_embedding(product: Product):
+    name = product.product_name or product.name or ""
+
+    brand = product.brand.brand_name if product.brand else ""
+    category = product.category.name if product.category else ""
+    p_type = product.product_type.product_type if product.product_type else ""
+
+    parts = [name, brand, category, p_type]
+
+    # Handle M2M safely
+    attrs = product.attributes.all() if hasattr(product.attributes, "all") else []
+
+    for a in attrs:
+        # dict-style attribute (if coming from annotation / JSON)
+        if isinstance(a, dict):
+            attr_name = a.get("name") or a.get("key") or ""
+            attr_value = a.get("value") or ""
+
+            if attr_name and attr_value:
+                parts.append(f"{attr_name} {attr_value}")
+            elif attr_value:
+                parts.append(str(attr_value))
+            elif attr_name:
+                parts.append(str(attr_name))
+
+        # ORM object-style attribute (common in M2M)
+        else:
+            attr_name = getattr(a, "name", "") or getattr(a, "key", "")
+            attr_value = getattr(a, "value", "")
+
+            if attr_name and attr_value:
+                parts.append(f"{attr_name} {attr_value}")
+            elif attr_value:
+                parts.append(str(attr_value))
+            elif attr_name:
+                parts.append(str(attr_name))
+
+    return " ".join(filter(None, parts)).strip()
+
+
 def sync_product_suggest_data_es(
     es: Elasticsearch,
     products: list,
@@ -330,7 +371,7 @@ def sync_product_suggest_data_es(
                 "length": product.length or 0,
                 "width": product.width or 0,
                 "height": product.height or 0,
-                "review": float(product.review) or 0,
+                "review": float(product.review) if product.review is not None else 0,
                 "base_price": product.base_price or 0,
                 "sale_price": product.sale_price or 0,
                 "selling_price": product.selling_price or 0,
@@ -347,6 +388,7 @@ def sync_product_suggest_data_es(
                 "meta_description": product.meta_description or "",
                 "search_keywords": product.search_keywords or "",
                 "stock_qty": product.stock_qty or 0,
+                "word_embedding": get_embedding(get_word_embedding(product)),
                 "features": [
                     {"name": f.name or "", "value": f.value or ""} for f in features
                 ],
@@ -496,7 +538,7 @@ def sync_product_suggest_data_es(
 
 
 @celery_app.task(bind=True)
-def import_products_task(self, file_path: str, obj_id: int):
+def import_products_task(self, file_path: str, obj_id: int, update_db: bool = False):
 
     session: Session = get_sync_session()
 
@@ -588,74 +630,88 @@ def import_products_task(self, file_path: str, obj_id: int):
 
                 existing_product = product_map.get(mpn)
 
+                if existing_product and not update_db:
+                    continue
+
+                # =========================
+                # FIXED LOGIC HERE
+                # =========================
                 if existing_product:
                     product = existing_product
-                    batch_updated += 1
-                    updated += 1
-                    products_to_delete_relations.append(product.id)
+
+                    if update_db:
+                        batch_updated += 1
+                        updated += 1
+                        products_to_delete_relations.append(product.id)
+
                 else:
                     product = Product(mpn=mpn, product_name=product_name)
                     session.add(product)
                     batch_inserted += 1
                     inserted += 1
 
-                for field in [
-                    "sku",
-                    "gtin",
-                    "ean",
-                    "upc",
-                    "taxonomy",
-                    "country_of_origin",
-                    "warranty",
-                    "weight_unit",
-                    "dimension_unit",
-                    "currency",
-                    "stock_status",
-                    "vendor_name",
-                    "vendor_sku",
-                    "short_description",
-                    "long_description",
-                    "meta_title",
-                    "meta_description",
-                    "search_keywords",
-                    "certification",
-                    "safety_standard",
-                    "hazardous_material",
-                    "prop65_warning",
-                    "review",
-                ]:
-                    setattr(product, field, row_dict.get(field))
+                # =========================
+                # FIELD UPDATE CONTROL FIX
+                # =========================
+                if update_db or not existing_product:
 
-                product.weight = to_float(row_dict.get("weight"))
-                product.length = to_float(row_dict.get("length"))
-                product.width = to_float(row_dict.get("width"))
-                product.height = to_float(row_dict.get("height"))
-                product.base_price = to_float(row_dict.get("base_price"))
-                product.sale_price = to_float(row_dict.get("sale_price"))
-                product.selling_price = to_float(row_dict.get("selling_price"))
-                product.special_price = to_float(row_dict.get("special_price"))
-                product.stock_qty = to_int(row_dict.get("stock_qty"))
+                    for field in [
+                        "sku",
+                        "gtin",
+                        "ean",
+                        "upc",
+                        "taxonomy",
+                        "country_of_origin",
+                        "warranty",
+                        "weight_unit",
+                        "dimension_unit",
+                        "currency",
+                        "stock_status",
+                        "vendor_name",
+                        "vendor_sku",
+                        "short_description",
+                        "long_description",
+                        "meta_title",
+                        "meta_description",
+                        "search_keywords",
+                        "certification",
+                        "safety_standard",
+                        "hazardous_material",
+                        "prop65_warning",
+                        "review",
+                    ]:
+                        setattr(product, field, row_dict.get(field))
 
-                industry_id = industry_map.get(row_dict.get("industry_name"))
-                if industry_id:
-                    product.industry_id = industry_id
+                    product.weight = to_float(row_dict.get("weight"))
+                    product.length = to_float(row_dict.get("length"))
+                    product.width = to_float(row_dict.get("width"))
+                    product.height = to_float(row_dict.get("height"))
+                    product.base_price = to_float(row_dict.get("base_price"))
+                    product.sale_price = to_float(row_dict.get("sale_price"))
+                    product.selling_price = to_float(row_dict.get("selling_price"))
+                    product.special_price = to_float(row_dict.get("special_price"))
+                    product.stock_qty = to_int(row_dict.get("stock_qty"))
 
-                category_obj = category_map.get(
-                    (row_dict.get("industry_name"), row_dict.get("taxonomy"))
-                )
-                if category_obj:
-                    product.category_id = category_obj.id
+                    industry_id = industry_map.get(row_dict.get("industry_name"))
+                    if industry_id:
+                        product.industry_id = industry_id
 
-                brand_id = brand_map.get(row_dict.get("brand"))
-                if brand_id:
-                    product.brand_id = brand_id
+                    category_obj = category_map.get(
+                        (row_dict.get("industry_name"), row_dict.get("taxonomy"))
+                    )
+                    if category_obj:
+                        product.category_id = category_obj.id
 
-                pt = row_dict.get("Product Type")
-                if pt:
-                    pt = pt.strip().lower()
-                pt_id = product_type_map.get(pt)
-                if pt_id:
-                    product.product_type_id = pt_id
+                    brand_id = brand_map.get(row_dict.get("brand"))
+                    if brand_id:
+                        product.brand_id = brand_id
+
+                    pt = row_dict.get("Product Type")
+                    if pt:
+                        pt = pt.strip().lower()
+                    pt_id = product_type_map.get(pt)
+                    if pt_id:
+                        product.product_type_id = pt_id
 
                 products_for_bg_task.append((product, row_dict))
 
