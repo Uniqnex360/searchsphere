@@ -26,7 +26,7 @@ BACKEND_URL = os.getenv("BACKEND_URL")
 # -----------------------------------
 # STEP 1: START INSTALL
 # -----------------------------------
-@router.get("/auth")
+@router.get("/auth/")
 def auth(shop: str):
 
     state = secrets.token_hex(16)
@@ -43,7 +43,7 @@ def auth(shop: str):
     return RedirectResponse(install_url)
 
 
-@router.get("/auth/callback")
+@router.get("/auth/callback/")
 async def auth_callback(
     shop: str, code: str, hmac: str, session: AsyncSession = Depends(get_session)
 ):
