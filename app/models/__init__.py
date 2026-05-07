@@ -16,3 +16,4 @@ from .product import (
     ProductSearchResult,
 )
 from .app_import import APPImport
+from .shopify import ShopifyAuth

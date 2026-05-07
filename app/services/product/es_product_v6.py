@@ -649,7 +649,7 @@ async def get_product_list_v6(
                     "values": {
                         "terms": {
                             "field": "product_type.keyword",
-                            "size": 150,
+                            "size": 300,
                             "order": {"_key": "asc"},
                         }
                     }
