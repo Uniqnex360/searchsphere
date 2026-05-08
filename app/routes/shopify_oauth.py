@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import RedirectResponse
 
+from app.settings import settings
 from app.database import get_session
 from app.models import ShopifyAuth
 
@@ -130,7 +131,7 @@ async def auth_callback(request: Request, session: AsyncSession = Depends(get_se
     # -----------------------------
     # 5. Redirect to frontend
     # -----------------------------
-    return {"message": "OAuth success", "shop": shop}
+    return RedirectResponse(url=f"{settings.frontend_url}?shop={shop}", status_code=302)
 
 
 def hmac_module(data: str):
