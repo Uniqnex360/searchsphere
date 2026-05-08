@@ -131,6 +131,8 @@ async def auth_callback(request: Request, session: AsyncSession = Depends(get_se
     # -----------------------------
     # 5. Redirect to frontend
     # -----------------------------
+    print("redirect working")
+    print("redirect url", f"{settings.frontend_url}?shop={shop}")
     return RedirectResponse(url=f"{settings.frontend_url}?shop={shop}", status_code=302)
 
 
