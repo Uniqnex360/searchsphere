@@ -41,6 +41,7 @@ def verify_hmac(query_params: dict, hmac_to_check: str):
 # -----------------------------------
 # STEP 1: START INSTALL
 # -----------------------------------
+@router.get("/auth")
 @router.get("/auth/")
 def auth(shop: str):
 
