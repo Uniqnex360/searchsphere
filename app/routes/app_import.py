@@ -14,7 +14,6 @@ from app.models import APPImport
 from app.database import get_session
 from app.services import ImportType, CeleryTaskStatus
 
-
 router = APIRouter()
 
 UPLOAD_DIR = "/app/uploads"
@@ -169,6 +168,23 @@ async def upload_products_file(
                 raise HTTPException(400, f"Missing columns: {missing}")
 
             # 5. Convert XLSX → CSV (stream row-by-row)
+            # with tempfile.NamedTemporaryFile(
+            #     delete=False,
+            #     suffix=".csv",
+            #     dir=UPLOAD_DIR,
+            #     mode="w",
+            #     newline="",
+            #     encoding="utf-8",
+            # ) as tmp_csv:
+
+            #     writer = csv.writer(tmp_csv)
+
+            #     for row in ws.iter_rows(values_only=True):
+            #         writer.writerow(["" if v is None else v for v in row])
+
+            #     temp_path = tmp_csv.name
+
+            # 5. Convert XLSX → CSV (stream row-by-row)
             with tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix=".csv",
@@ -181,7 +197,14 @@ async def upload_products_file(
                 writer = csv.writer(tmp_csv)
 
                 for row in ws.iter_rows(values_only=True):
-                    writer.writerow(["" if v is None else v for v in row])
+
+                    cleaned_row = ["" if v is None else str(v).strip() for v in row]
+
+                    # ✅ Ignore fully empty rows
+                    if not any(cleaned_row):
+                        continue
+
+                    writer.writerow(cleaned_row)
 
                 temp_path = tmp_csv.name
 
