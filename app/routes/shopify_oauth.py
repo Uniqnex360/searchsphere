@@ -93,6 +93,7 @@ async def auth_callback(request: Request, session: AsyncSession = Depends(get_se
         "client_id": SHOPIFY_API_KEY,
         "client_secret": SHOPIFY_API_SECRET,
         "code": code,
+        "expiring": "1"
     }
 
     response = requests.post(token_url, json=payload)
