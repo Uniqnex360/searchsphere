@@ -147,7 +147,7 @@ async def update_word_embeddings(
 async def run_elastic_search(es: Elasticsearch = Depends(get_es)):
     try:
         response = es.indices.put_settings(
-            index="product_v7", body={"index": {"max_result_window": 200000}}
+            index="product_v7", body={"index": {"max_result_window": 500000}}
         )
 
         return {"acknowledged": response.get("acknowledged", False)}
