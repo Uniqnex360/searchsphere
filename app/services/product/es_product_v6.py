@@ -631,7 +631,7 @@ async def get_product_list_v6(
                     "values": {
                         "terms": {
                             "field": "brand.keyword",
-                            "size": 750,
+                            "size": 2000,
                             "order": {"_key": "asc"},
                         }
                     }
@@ -649,7 +649,7 @@ async def get_product_list_v6(
                     "values": {
                         "terms": {
                             "field": "product_type.keyword",
-                            "size": 5000,
+                            "size": 10000,
                             "order": {"_key": "asc"},
                         }
                     }
@@ -665,7 +665,7 @@ async def get_product_list_v6(
                     "values": {
                         "terms": {
                             "field": "category.keyword",
-                            "size": 5000,
+                            "size": 7000,
                             "order": {"_key": "asc"},
                         }
                     }
