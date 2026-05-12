@@ -594,6 +594,7 @@ async def get_product_list_v6(
         "runtime_mappings": (
             runtime_mappings if (has_query or is_any_filter_used) else {}
         ),
+        "from":  (page - 1) * size,
         "size": size,
         "query": query_body,
         "post_filter": {"bool": {"must": filters}},
