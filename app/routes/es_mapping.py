@@ -141,3 +141,16 @@ async def update_word_embeddings(
     except Exception as e:
         print(f"Backfill failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run/es_code/")
+async def run_elastic_search(es: Elasticsearch = Depends(get_es)):
+    try:
+        response = es.indices.put_settings(
+            index="product_v7", body={"index": {"max_result_window": 200000}}
+        )
+
+        return {"acknowledged": response.get("acknowledged", False)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
