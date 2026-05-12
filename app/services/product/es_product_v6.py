@@ -178,17 +178,10 @@ async def get_product_list_v6(
     size: int = 50,
     index: str = "product_v7",
     end_date: datetime = None,
+    cursor: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
 
     start_total = time.perf_counter()
-
-    ES_MAX_WINDOW = 10000
-    requested_from = (page - 1) * size
-
-    if (requested_from + size) > ES_MAX_WINDOW:
-        current_from = ES_MAX_WINDOW - size
-    else:
-        current_from = requested_from
 
     SYNONYMS = {
         "mobile": ["smartphone", "cellphone"],
@@ -574,6 +567,8 @@ async def get_product_list_v6(
     else:
         es_sort.append({"_score": {"order": sort_order}})
 
+    es_sort.append({"created_at": "desc"}) # for search after to work
+
     if sort_by == "created_at":
         cutoff_date = datetime.utcnow() - timedelta(days=2)
 
@@ -599,7 +594,6 @@ async def get_product_list_v6(
         "runtime_mappings": (
             runtime_mappings if (has_query or is_any_filter_used) else {}
         ),
-        "from": current_from,
         "size": size,
         "query": query_body,
         "post_filter": {"bool": {"must": filters}},
@@ -677,6 +671,9 @@ async def get_product_list_v6(
             },
         },
     }
+
+    if cursor:
+        body["search_after"] = cursor
 
     resp = es.search(index=index, body=body)
 
