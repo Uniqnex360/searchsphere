@@ -538,7 +538,7 @@ def sync_product_suggest_data_es(
 
 
 @celery_app.task(bind=True)
-def import_products_task(self, file_path: str, obj_id: int, update_db: bool = False):
+def import_products_task(self, file_path: str, obj_id: int, update_db: bool = True):
 
     session: Session = get_sync_session()
 
@@ -814,7 +814,8 @@ def import_products_task(self, file_path: str, obj_id: int, update_db: bool = Fa
 
             progress = int(((batch_idx + 1) / total_batches) * 100)
 
-            if progress - last_progress >= 20:
+            # if progress - last_progress >= 20:
+            if progress != last_progress:
                 last_progress = progress
 
                 obj.meta_data = {
