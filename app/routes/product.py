@@ -1,6 +1,6 @@
 import re
 import time
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from itertools import permutations
 from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
@@ -686,6 +686,7 @@ async def product_list_v6(
     sort_order: str = "desc",
     page: int = 1,
     end_date: Optional[datetime] = Query(None),
+    cursor: Optional[List[Any]] = None,
 ):
 
     start_total = time.perf_counter()
@@ -732,6 +733,7 @@ async def product_list_v6(
         sort_order=sort_order,
         page=page,
         end_date=end_date,
+        cursor=cursor,
     )
     es_duration = time.perf_counter() - start_es
     print(f"Timing - Elasticsearch Query: {es_duration:.4f}s")

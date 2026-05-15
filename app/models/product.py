@@ -4,6 +4,7 @@ from sqlalchemy.dialects.postgresql import JSON
 from typing import List, Optional, Dict, Any
 
 from app.models import BaseModel, BaseURLModel
+from app.models.shopify import ShopifyAuth
 
 
 class Product(BaseModel, table=True):
@@ -67,12 +68,19 @@ class Product(BaseModel, table=True):
     category_id: int = Field(foreign_key="category.id")
     brand_id: Optional[int] = Field(foreign_key="brand.id")
     product_type_id: Optional[int] = Field(foreign_key="product_type.id")
+    shopify_auth_id: Optional[int] = Field(
+        default=None,
+        foreign_key="shopifyauth.id",
+        nullable=True,
+        index=True,
+    )
 
     # Relationships
     industry: Optional["Industry"] = Relationship(back_populates="products")
     brand: Optional["Brand"] = Relationship(back_populates="products")
     category: Optional["Category"] = Relationship(back_populates="products")
     product_type: Optional["ProductType"] = Relationship(back_populates="products")
+    shopify_auth: Optional["ShopifyAuth"] = Relationship(back_populates="products")
 
     features: List["ProductFeature"] = Relationship(back_populates="product")
     images: List["ProductImage"] = Relationship(back_populates="product")

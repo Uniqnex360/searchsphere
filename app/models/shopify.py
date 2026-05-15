@@ -1,5 +1,5 @@
-from sqlmodel import SQLModel, Field
-from typing import Optional
+from sqlmodel import Field, Relationship
+from typing import Optional, List
 from datetime import datetime
 
 from app.models import BaseModel
@@ -15,3 +15,7 @@ class ShopifyAuth(BaseModel, table=True):
     is_active: bool = Field(default=True)
 
     installed_at: datetime = Field(default_factory=datetime.utcnow)
+
+    products: List["Product"] = Relationship(
+        back_populates="shopify_auth", sa_relationship_kwargs={"lazy": "selectin"}
+    )
