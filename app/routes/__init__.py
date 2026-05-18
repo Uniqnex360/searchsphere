@@ -5,6 +5,7 @@ from .app_import import router as app_import
 from .dashboard import router as dashboard
 from .es_mapping import router as es_mapping
 from .shopify_oauth import router as shopify_oauth
+from .gdpr import router as gdpr
 
 routers = [
     category_router,
@@ -14,4 +15,5 @@ routers = [
     dashboard,
     es_mapping,
     shopify_oauth,
+    gdpr,
 ]
